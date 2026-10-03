@@ -6,11 +6,13 @@ import { R, sample } from './planet.js';
 
 const loader = new GLTFLoader();
 const BASE = import.meta.env.BASE_URL + 'assets/';
+// model file extension (the hosted artifact build uses self-contained .json glTF)
+const EXT = import.meta.env.VITE_MODEL_EXT || '.glb';
 const cache = new Map();
 
 export function loadGLB(path) {
   if (!cache.has(path)) {
-    cache.set(path, new Promise((res, rej) => loader.load(BASE + path + '.glb', res, undefined, rej)));
+    cache.set(path, new Promise((res, rej) => loader.load(BASE + path + EXT, res, undefined, rej)));
   }
   return cache.get(path);
 }
