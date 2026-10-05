@@ -6,7 +6,7 @@ export const NPCS = [
     hi: 'Psst! Want a parasol?',
     lines: [
       "Oh! A new face! I make parasols. Well... I make ONE parasol, over and over again.",
-      "Here, take this one! Hold SPACE while you're falling and it'll float you down nice and gently.",
+      "Here, take this one! {Hold SPACE} while you're falling and it'll float you down nice and gently.",
       "Try it off a rooftop! ...Actually, don't tell the mayor I said that.",
     ],
     gives: 'glider',
@@ -19,7 +19,7 @@ export const NPCS = [
       'Welcome to Pebbleton! Population: small. Charm: enormous.',
       "Everyone says this planet is tiny. Have they tried walking around it? I have. Took me all afternoon.",
       'If you spot any Stardrops, grab them! Legend says they fell from the sky the night the planet was born.',
-      'Press TAB or J to check your journal. It keeps track of everywhere you\'ve been.',
+      '{Press J} to check your journal. It keeps track of everywhere you\'ve been.',
     ],
   },
   {
@@ -36,7 +36,7 @@ export const NPCS = [
     lines: [
       "Tag! You're it! ...Wait, you're not chasing me. That's not how it works.",
       'I heard there\'s a giant stone head way up north. I bet it sneezes.',
-      'Did you know if you run (SHIFT) you go faster? I invented that.',
+      'Did you know if you {run} you go faster? I invented that.',
     ],
   },
   {
@@ -44,7 +44,7 @@ export const NPCS = [
     hi: 'Sit a while...',
     lines: [
       'Sit a while. Watch the clouds go round. They always come back, you know.',
-      'Press E on a bench to sit down. Time flies when you sit still. Literally. Try it and watch the sun.',
+      'Walk up to a bench and {press E} to sit down. Time flies when you sit still. Literally. Try it and watch the sun.',
       'When I was young this planet was so small you could hear your own footsteps come back around.',
     ],
   },
@@ -61,9 +61,9 @@ export const NPCS = [
     id: 'gale', name: 'Captain Gale', skin: 'character-male-f', region: 'harbor', at: [7, 1], behavior: 'idle', pitch: 0.75,
     hi: 'Ahoy there!',
     lines: [
-      "Ahoy! See that little rowboat at the end of the pier? She's yours if you want her. Walk up and press E to hop in.",
+      "Ahoy! See that little rowboat at the end of the pier? She's yours if you want her. Walk up and {press E} to hop in.",
       "Out east, past the deep water, there's an island shaped like a turtle. Or a turtle shaped like an island. Never got close enough to check.",
-      'Steer with A and D, row with W. Press E near the shore to hop out.',
+      '{row} {Press E} near the shore to hop out.',
     ],
   },
   {
@@ -92,7 +92,7 @@ export const NPCS = [
     hi: 'Mind the roots!',
     lines: [
       'The Whisperwood trees whisper. Mostly gossip about squirrels.',
-      'Walk up to an animal slowly and press E to pet it. They love a good scratch. Running scares them off!',
+      'Walk up to an animal slowly and {press E} to pet it. They love a good scratch. Running scares them off!',
     ],
   },
   {
@@ -116,8 +116,8 @@ export const NPCS = [
     id: 'otto', name: 'Otto', skin: 'character-male-c', region: 'meadow', at: [8, -3], behavior: 'idle', pitch: 0.85,
     hi: 'All aboard!',
     lines: [
-      'Step into the basket and press E. Hold on to your hat!',
-      'Pro tip: you can jump out mid-flight with SPACE. With a parasol, that\'s not even a bad idea.',
+      'Step up to the basket and {press E}. Hold on to your hat!',
+      'Pro tip: you can jump out mid-flight with {SPACE}. With a parasol, that\'s not even a bad idea.',
     ],
   },
   // ---- Windmill Farm
@@ -140,7 +140,7 @@ export const NPCS = [
   {
     id: 'kit', name: 'Climber Kit', skin: 'character-male-e', region: 'mountain', at: [-14, -12], behavior: 'idle', pitch: 1.1,
     hi: 'Phew!',
-    lines: ['Halfway up! Or halfway down. Depends on your outlook.', 'If a slope is too steep, try jumping up the ledges. SPACE is your friend.'],
+    lines: ['Halfway up! Or halfway down. Depends on your outlook.', 'If a slope is too steep, try jumping up the ledges. {Space} is your friend.'],
   },
   // ---- Sunscorch Dunes
   {

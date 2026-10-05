@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { R, sample, normalAt, regionAt, regionById, REGIONS, biomeAt, tangentBasis, angle } from './planet.js';
-import { Scatter, surfaceMatrix, surfaceQuat, makeObject, getModel } from './assets.js';
+import { Scatter, surfaceMatrix, surfaceQuat, makeObject, getModel, modelCollider, trunkRadius } from './assets.js';
+import { resolve } from './collision.js';
+import { IS_TOUCH } from './input.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { toonMaterial, globalUniforms } from './toon.js';
 import { mulberry32 } from './noise.js';
@@ -52,14 +54,11 @@ const BIOME_SCATTER = {
   ruins: [['tree_detailed', 1, 5.5], ['tree_oak', 0.8, 5.5], ['plant_bushDetailed', 1.5, 4], ['statue_block', 0.6, 4], ['flower_purpleB', 2, 4], ['rock_largeB', 0.5, 4], ['grass_large', 3, 4]],
 };
 
-const COLLIDE_R = (path) => {
-  if (/tree_palm/.test(path)) return [0.35, Infinity];
-  if (/tree|cactus/.test(path)) return [0.5, Infinity];
-  if (/rock_large|stone_large|rock-sand|rock_tall|stone_tall/.test(path)) return [1.4, 1.6];
-  if (/log|stump/.test(path)) return [0.7, 0.8];
-  if (/statue_block/.test(path)) return [1.0, 1.4];
-  if (/mushroom_.*Tall/.test(path)) return [0.35, Infinity];
-  return null;
+// Which scattered props are solid by default: trees just at the trunk, chunky things by their actual mesh.
+const AUTO_COLLIDE = (path) => {
+  if (/tree|palm/.test(path)) return 'trunk';
+  if (/cactus|rock_large|stone_large|rock-sand|rock_tall|stone_tall|log|stump|statue|mushroom_.*Tall/.test(path)) return 'mesh';
+  return false;
 };
 
 export async function buildWorld(game) {
@@ -71,16 +70,22 @@ export async function buildWorld(game) {
   game.world = world;
 
   const P = (n) => (n.includes('/') ? n : 'nature/' + n);
-  /** Place a static prop. returns matrix */
-  function prop(path, dir, { yaw = 0, scale = 1, lift = 0, collide, top, shadow = true, height } = {}) {
+  /**
+   * Place a static prop. Its collider comes from the model's own mesh (`collide: 'mesh'`), just a tree trunk
+   * ('trunk'), nothing (false), or a plain cylinder of the given radius (number, with optional `top`).
+   * Defaults to AUTO_COLLIDE. Returns the matrix.
+   */
+  function prop(path, dir, { yaw = 0, scale = 1, lift = 0, collide, top, shadow = true, height, onLand } = {}) {
     path = P(path);
     const m = surfaceMatrix(dir, { yaw, scale, lift, height });
     scatter.add(path, m, { shadow });
-    let c = collide;
-    if (c === undefined) { const cr = COLLIDE_R(path); if (cr) c = cr[0] * (scale / 5); if (cr && top === undefined) top = cr[1] === Infinity ? Infinity : cr[1] * (scale / 5); }
-    if (c) {
+    if (collide === undefined) collide = AUTO_COLLIDE(path);
+    if (collide) {
       const h = height !== undefined ? height : sample(dir);
-      colliders.add({ pos: dir.clone().multiplyScalar(R + h + lift), r: c, top: top === undefined ? Infinity : top });
+      const base = dir.clone().multiplyScalar(R + h + lift);
+      if (collide === 'mesh') colliders.add(modelCollider(path, base, dir, { yaw, scale, onLand }));
+      else if (collide === 'trunk') colliders.add({ pos: base, r: trunkRadius(path) * scale, top: getModel(path).size.y * scale });
+      else colliders.add({ pos: base, r: collide, top: top ?? Infinity, onLand });
     }
     return m;
   }
@@ -101,8 +106,8 @@ export async function buildWorld(game) {
   {
     // fountain
     const fdir = V.clone();
-    prop('town/fountain-round', fdir, { scale: 2.6, collide: 2.5, top: 0.75 });
-    prop('town/fountain-center', fdir, { scale: 2.6, lift: 0.0, collide: 1.2, top: Infinity, shadow: true });
+    prop('town/fountain-round', fdir, { scale: 2.6, collide: 'mesh' });
+    prop('town/fountain-center', fdir, { scale: 2.6, lift: 0.0, collide: 'mesh', shadow: true });
     const water = new THREE.Mesh(new THREE.CircleGeometry(2.2, 24), toonMaterial({ color: 0x8fdcd8 }));
     water.position.copy(surfPos(fdir, 0.5)); water.quaternion.copy(surfaceQuat(fdir)).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2));
     scene.add(water);
@@ -120,13 +125,16 @@ export async function buildWorld(game) {
       const d = offsetDir(V, Math.cos(a) * r, Math.sin(a) * r);
       const yaw = yawToward(d, V);
       const type = houses[(i * 5) % houses.length];
-      prop('houses/building-type-' + type, d, { yaw, scale: 6.5, lift: -0.15, collide: 4.6, top: Infinity });
+      prop('houses/building-type-' + type, d, { yaw, scale: 6.5, lift: -0.15, collide: 'mesh' });
       // a lantern & planter in front
       const front = offsetDir(V, Math.cos(a) * (r - 6.2), Math.sin(a) * (r - 6.2));
       if (i % 2 === 0) {
-        prop('town/lantern', offsetDir(V, Math.cos(a + 0.18) * (r - 6), Math.sin(a + 0.18) * (r - 6)), { scale: 2.4, collide: 0.3 });
-        fx.addGlow(surfPos(offsetDir(V, Math.cos(a + 0.18) * (r - 6), Math.sin(a + 0.18) * (r - 6)), 3.5), 0xffc46b, 3);
-      } else prop('houses/planter', front, { yaw, scale: 3, collide: 0.8, top: 0.7 });
+        const pole = offsetDir(V, Math.cos(a + 0.18) * (r - 6), Math.sin(a + 0.18) * (r - 6));
+        prop('town/lantern', pole, { scale: 2.4, collide: 'mesh' });
+        fx.addGlow(surfPos(pole, 3.5), 0xffc46b, 3);
+        if (i === 6) bannerOnPole('town/banner-red', pole);
+        if (i === 12) bannerOnPole('town/banner-green', pole);
+      } else prop('houses/planter', front, { yaw, scale: 3, collide: 'mesh' });
     }
     // outer houses
     for (let i = 0; i < 9; i++) {
@@ -134,55 +142,79 @@ export async function buildWorld(game) {
       const r = 32 + (i % 2) * 4;
       const d = offsetDir(V, Math.cos(a) * r, Math.sin(a) * r);
       if (sample(d) < 1.5) continue;
-      prop('houses/building-type-' + houses[(i * 7 + 3) % houses.length], d, { yaw: yawToward(d, V), scale: 6.5, lift: -0.2, collide: 4.6 });
-      prop('houses/tree-large', offsetDir(V, Math.cos(a + 0.12) * (r + 2), Math.sin(a + 0.12) * (r + 2)), { scale: 6, collide: 0.5 });
+      prop('houses/building-type-' + houses[(i * 7 + 3) % houses.length], d, { yaw: yawToward(d, V), scale: 6.5, lift: -0.2, collide: 'mesh' });
+      prop('houses/tree-large', offsetDir(V, Math.cos(a + 0.12) * (r + 2), Math.sin(a + 0.12) * (r + 2)), { scale: 6 });
     }
     // market stalls
     const stalls = ['town/stall-red', 'town/stall-green', 'town/stall', 'town/stall-red'];
     stalls.forEach((s, i) => {
       const d = at('village', 9 + i * 0.3, 7 - i * 3.2);
-      prop(s, d, { yaw: yawToward(d, V), scale: 2.4, collide: 1.2, top: Infinity });
+      prop(s, d, { yaw: yawToward(d, V), scale: 2.4, collide: 'mesh' });
     });
-    prop('town/cart', at('village', -10, 7), { yaw: 0.6, scale: 2.4, collide: 1.1, top: 1.2 });
-    prop('survival/barrel', at('village', 11, 0), { scale: 2.6, collide: 0.5, top: 1.0 });
-    prop('survival/barrel', at('village', 11.8, -0.8), { scale: 2.6, collide: 0.5, top: 1.0 });
-    prop('survival/box-large', at('village', 12, 1.2), { scale: 2.6, collide: 0.7, top: 1.1 });
-    prop('town/banner-red', at('village', -13.5, -2), { scale: 2.6, collide: 0.4 });
-    prop('town/banner-green', at('village', 13.5, -4), { scale: 2.6, collide: 0.4 });
+    prop('town/cart', at('village', -10, 7), { yaw: 0.6, scale: 2.4, collide: 'mesh' });
+    prop('survival/barrel', at('village', 11, 0), { scale: 2.6, collide: 'mesh' });
+    prop('survival/barrel', at('village', 11.8, -0.8), { scale: 2.6, collide: 'mesh' });
+    prop('survival/box-large', at('village', 12, 1.2), { scale: 2.6, collide: 'mesh' });
     // benches around fountain
     for (let i = 0; i < 4; i++) {
       const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
       const d = offsetDir(V, Math.cos(a) * 7, Math.sin(a) * 7);
-      addBench(d, yawToward(d, V) + Math.PI / 2);
+      addBench(d, yawToward(d, V) + Math.PI / 2, V);
     }
     // little trees in square
     for (let i = 0; i < 6; i++) {
       const a = (i / 6) * Math.PI * 2;
-      prop('houses/tree-small', offsetDir(V, Math.cos(a) * 11.5, Math.sin(a) * 11.5), { scale: 5, collide: 0.4 });
+      prop('houses/tree-small', offsetDir(V, Math.cos(a) * 11.5, Math.sin(a) * 11.5), { scale: 5 });
     }
     // signpost
     addSign(at('village', 0, -14), 'Pebbleton  ·  East: Gull Harbor  ·  North-East: Mount Hush  ·  West: Mirror Lake  ·  South: Windmill Farm');
   }
 
-  // ---------------------------------------------------------------- benches & signs helpers
-  function addBench(dir, yaw) {
-    prop('town/stall-bench', dir, { yaw, scale: 2.6, collide: 0.5, top: 0.65 });
-    const seat = { dir, yaw, pos: surfPos(dir, 0.15) };
+  // ---------------------------------------------------------------- benches, banners & signs helpers
+  // Benches and logs are long along their local Z: you sit on top, facing across them (local ±X).
+  function acrossSeat(dir, yaw, lookAt) {
+    const x = new THREE.Vector3(1, 0, 0).applyQuaternion(surfaceQuat(dir, yaw));
+    if (lookAt && x.dot(lookAt) < x.dot(dir)) x.negate(); // turn toward lookAt
+    return x;
+  }
+  /** Where to put a sitter: on top of the seat at `dir` (the sit pose sits on whatever is under its feet). */
+  function seatPos(dir) {
+    const probe = surfPos(dir, 0.02);
+    const res = resolve(colliders, probe.clone(), 0.15, { step: 1.5 });
+    return dir.clone().multiplyScalar(Math.max(probe.length(), res.floor) - 0.03);
+  }
+  function addBench(dir, yaw, lookAt) {
+    prop('town/stall-bench', dir, { yaw, scale: 2.6, collide: 'mesh' });
+    const seat = { dir, facing: acrossSeat(dir, yaw, lookAt), pos: seatPos(dir) };
     world.seats.push(seat);
     addInteract({ pos: seat.pos, radius: 2.0, label: 'Sit', action: () => sitDown(seat) });
     return seat;
   }
+  /**
+   * The banner models are wall banners: a cloth hanging from a short rod ~1m off the model's origin. Hang one
+   * from a lamp post instead, cloth facing the square and its rod resting against the pole.
+   */
+  function bannerOnPole(path, pole, scale = 2.6) {
+    const yaw = yawToward(pole, V) - Math.PI / 2; // the cloth's normal (model +X) points at the square
+    const q = surfaceQuat(pole, yaw);
+    const off = new THREE.Vector3(1, 0, 0).applyQuaternion(q).multiplyScalar(-0.4 * scale)
+      .addScaledVector(new THREE.Vector3(0, 0, 1).applyQuaternion(q), -(0.12 * scale + 0.14));
+    const d = pole.clone().multiplyScalar(R).add(off).normalize();
+    prop(path, d, { yaw, scale, height: sample(pole), collide: 'mesh' });
+  }
   function addSign(dir, text) {
-    prop('survival/signpost', dir, { scale: 2.8, collide: 0.3 });
+    prop('survival/signpost', dir, { scale: 2.8, collide: 'mesh' });
     addInteract({ pos: surfPos(dir, 1), radius: 2.5, label: 'Read', action: () => ui.dialogue('Signpost', [text], 0, null) });
   }
   world.addSeat = (npc) => {
-    // put a bench (or log) under a sitting NPC
+    // put a bench (or log) under a sitting NPC, turned across the way they face, and sit them on top of it
     const d = npc.home;
     const biome = biomeAt(d);
-    if (biome === 'forest' || biome === 'beach' || biome === 'desert') prop('log', d, { scale: 4, yaw: rand() * 6, collide: 0.6, top: 0.5 });
-    else prop('town/stall-bench', d, { scale: 2.6, yaw: 0, collide: 0.6, top: 0.65 });
-    npc.lift = 0.12;
+    const yaw = yawToward(d, d.clone().add(npc.facing)) - Math.PI / 2;
+    if (biome === 'forest' || biome === 'beach' || biome === 'desert') prop('log', d, { scale: 4, yaw: yaw + (rand() - 0.5) * 0.3, collide: 'mesh' });
+    else prop('town/stall-bench', d, { scale: 2.6, yaw, collide: 'mesh' });
+    npc.pos.copy(seatPos(d));
+    npc.sync();
   };
 
   let seated = null;
@@ -191,15 +223,16 @@ export async function buildWorld(game) {
     seated = seat;
     p.mode = 'sit';
     p.pos.copy(seat.pos);
-    const q = surfaceQuat(seat.dir, seat.yaw);
-    p.facing.set(0, 0, 1).applyQuaternion(q);
+    p.facing.copy(seat.facing);
     p.sync();
     p.anim.play('sit', 0.2);
-    ui.toast('Sitting. Time flies... (press E or SPACE to stand)');
+    ui.toast(IS_TOUCH ? 'Sitting. Time flies... (tap Stand up when you\'re ready)' : 'Sitting. Time flies... (press E or SPACE to stand)');
   }
   game.updaters.push((dt) => {
-    const p = game.player;
-    if (seated && p.mode === 'sit' && (game.input.hit('KeyE', 'Space', 'Tap') || game.input.axes().y !== 0 && game.input.hit('KeyW', 'KeyS', 'KeyA', 'KeyD'))) {
+    const p = game.player, inp = game.input;
+    const ax = inp.axes();
+    const walkAway = inp.hit('KeyW', 'KeyS', 'KeyA', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight') || (inp.touchMove.active && Math.hypot(ax.x, ax.y) > 0.6);
+    if (seated && p.mode === 'sit' && (inp.hit('KeyE', 'Space', 'Tap') || walkAway)) {
       seated = null; p.mode = 'walk';
       p.pos.addScaledVector(p.facing, 0.9);
       p.anim.play('idle', 0.2);
@@ -213,13 +246,13 @@ export async function buildWorld(game) {
     const houses = ['k', 'b', 'e', 'p', 'g'];
     houses.forEach((t, i) => {
       const d = at('harbor', -10 + i * 5.5, 8 + (i % 2) * 2);
-      prop('houses/building-type-' + t, d, { yaw: Math.PI, scale: 5.5, lift: -0.15, collide: 3.8 });
+      prop('houses/building-type-' + t, d, { yaw: Math.PI, scale: 5.5, lift: -0.15, collide: 'mesh' });
     });
-    prop('boats/boat-house-a', at('harbor', -14, -6), { scale: 2.2, yaw: 1.2, collide: 3 });
-    prop('boats/cargo-pile-a', at('harbor', -6, -9), { scale: 2, collide: 2, top: 2.2 });
-    for (let i = 0; i < 6; i++) prop('survival/' + (i % 2 ? 'barrel' : 'box'), at('harbor', 2 + i * 0.9, -5 - (i % 3)), { scale: 2.6, collide: 0.5, top: 1.0 });
+    prop('boats/boat-house-a', at('harbor', -14, -6), { scale: 2.2, yaw: 1.2, collide: 'mesh' });
+    prop('boats/cargo-pile-a', at('harbor', -6, -9), { scale: 2, collide: 'mesh' });
+    for (let i = 0; i < 6; i++) prop('survival/' + (i % 2 ? 'barrel' : 'box'), at('harbor', 2 + i * 0.9, -5 - (i % 3)), { scale: 2.6, collide: 'mesh' });
     addSign(at('harbor', -2, 2), 'Gull Harbor  ·  Rowboat for hire (free!)  ·  Turtle Isle: far, far east across the sea');
-    prop('town/lantern', at('harbor', 3, 4), { scale: 2.4, collide: 0.3 });
+    prop('town/lantern', at('harbor', 3, 4), { scale: 2.4, collide: 'mesh' });
     fx.addGlow(surfPos(at('harbor', 3, 4), 3.5), 0xffc46b, 3);
   }
   // pier: walk east from the harbor until the water
@@ -237,7 +270,7 @@ export async function buildWorld(game) {
     o.scale.setScalar(s);
     scene.add(o);
     bobbers.push({ o, d, yaw, ph: rand() * 6 });
-    colliders.add({ pos: d.clone().multiplyScalar(R), r: s * 1.4, top: Infinity });
+    colliders.add(modelCollider(path, d.clone().multiplyScalar(R - 0.15), d, { yaw, scale: s }));
   }
   // buoys around the reef
   for (let i = 0; i < 8; i++) {
@@ -272,6 +305,9 @@ export async function buildWorld(game) {
     if (start === null || end === null) return null;
     start -= 4;
     const deck = 1.5;
+    // reach back up the beach until the first plank is a comfortable step up from the sand
+    const start0 = start;
+    for (let k = 0; k < 10 && sample(offsetDir(center, de * start, dn * start)) < deck - 0.35; k++) start -= 1.15;
     const plankGeo = new THREE.BoxGeometry(3, 0.25, 1.1);
     const postGeo = new THREE.CylinderGeometry(0.18, 0.18, 4, 6);
     let last;
@@ -279,12 +315,15 @@ export async function buildWorld(game) {
       const d = offsetDir(center, de * s, dn * s);
       const m = new THREE.Mesh(plankGeo, mat);
       m.position.copy(d).multiplyScalar(R + deck);
-      const ahead = offsetDir(center, de * (s + 1), dn * (s + 1)).sub(d);
-      orient(m, d, tangent(ahead, d));
-      m.rotateY((rand() - 0.5) * 0.05);
+      const fwd = tangent(offsetDir(center, de * (s + 1), dn * (s + 1)).sub(d), d);
+      orient(m, d, fwd);
+      m.rotateY(s < start0 - 0.01 ? Math.sin(s * 12.9898) * 0.025 : (rand() - 0.5) * 0.05);
       m.castShadow = m.receiveShadow = true;
       g.add(m);
-      colliders.add({ pos: d.clone().multiplyScalar(R - 6), r: 1.6, top: 6 + deck + 0.12 });
+      colliders.add({
+        pos: d.clone().multiplyScalar(R + deck + 0.12 - 8), up: d.clone(), y1: 8,
+        ax: new THREE.Vector3().crossVectors(d, fwd).normalize(), az: fwd.clone(), hx: 1.5, hz: 0.6,
+      });
       if (Math.round(s / 1.15) % 3 === 0) {
         for (const side of [-1.35, 1.35]) {
           const pd = offsetDir(center, de * s + dn * side, dn * s - de * side);
@@ -318,14 +357,27 @@ export async function buildWorld(game) {
     const boat = { dir: endD.clone(), facing: new THREE.Vector3(), speed: 0, riding: false, obj: boatObj };
     tangentBasis(boat.dir, boat.facing, new THREE.Vector3());
     world.boat = boat;
-    const it = addInteract({ get pos() { return boat.obj.position; }, radius: 3.6, label: 'Row the boat', action: () => {
+    const it = addInteract({ get pos() { return boat.obj.position; }, radius: 3.6, label: 'Row the boat', icon: '🚣', action: () => {
       const p = game.player;
       boat.riding = true; p.mode = 'ride'; p.anim.play('sit', 0.2);
       boat.facing.copy(p.facing); tangent(boat.facing, boat.dir);
-      ui.toast('W to row · A/D to steer · E near land to hop out');
+      boat.landing = null; boat.scanT = 0;
+      ui.toast(IS_TOUCH ? 'Push the stick to row & steer · "Hop out" pops up near land' : 'W to row · A/D to steer · E near land to hop out');
       it.enabled = false;
     } });
     boat.interact = it;
+    // nearest dry spot to hop out onto (or the pier), refreshed a few times a second while rowing
+    const findLanding = () => {
+      if (pier && boat.dir.angleTo(pier.end) * R < 6) return { onPier: true };
+      let best = null;
+      for (let a = 0; a < 16; a++) {
+        for (const r of [3, 5, 7]) {
+          const d = offsetDir(boat.dir, Math.cos(a / 16 * 6.283) * r, Math.sin(a / 16 * 6.283) * r);
+          if (sample(d) > 0.3 && (!best || r < best.r)) best = { d, r };
+        }
+      }
+      return best;
+    };
     game.updaters.push((dt, g) => {
       const p = g.player, inp = g.input;
       const up = boat.dir;
@@ -342,21 +394,17 @@ export async function buildWorld(game) {
         p.sync();
         p.anim.play('sit', 0.2);
         if (Math.abs(boat.speed) > 1 && Math.random() < dt * 4) audio.swim();
+        boat.scanT -= dt;
+        if (boat.scanT <= 0) { boat.scanT = 0.2; boat.landing = findLanding(); }
         if (inp.hit('KeyE', 'Tap')) {
           // hop out onto nearest land
-          let best = null;
-          for (let a = 0; a < 16; a++) {
-            for (const r of [3, 5, 7]) {
-              const d = offsetDir(boat.dir, Math.cos(a / 16 * 6.283) * r, Math.sin(a / 16 * 6.283) * r);
-              if (sample(d) > 0.3 && (!best || r < best.r)) best = { d, r };
-            }
-          }
-          const onPier = pier && boat.dir.angleTo(pier.end) * R < 6;
-          if (best || onPier) {
+          const best = findLanding();
+          if (best) {
             boat.riding = false; p.mode = 'walk';
-            if (onPier) p.place(pier.end, p.facing); else p.place(best.d, p.facing);
-            p.pos.setLength(p.pos.length() + (onPier ? pier.deck + 0.3 : 0.2));
+            if (best.onPier) p.place(pier.end, p.facing); else p.place(best.d, p.facing);
+            p.pos.setLength(p.pos.length() + (best.onPier ? pier.deck + 0.3 : 0.2));
             it.enabled = true;
+            boat.landing = null;
             inp.pressed.clear();
           } else ui.toast('Too far from land to hop out!');
         }
@@ -392,7 +440,12 @@ export async function buildWorld(game) {
     g.position.copy(d).multiplyScalar(base - 0.2);
     g.quaternion.copy(surfaceQuat(d));
     scene.add(g);
-    colliders.add({ pos: d.clone().multiplyScalar(base), r: 2.0, top: Infinity });
+    // tapering tower, walkable balcony, lamp room and a roof you can perch on (the Stardrop sits just above it)
+    const lb = d.clone().multiplyScalar(base - 0.2);
+    colliders.add({ pos: lb, r: 1.9, rt: 0.82, top: 13.2 });
+    colliders.add({ pos: lb, r: 1.7, y0: 13.2, top: 13.55 });
+    colliders.add({ pos: lb, r: 0.9, y0: 13.55, top: 15.2 });
+    colliders.add({ pos: lb, r: 1.4, rt: 0.05, y0: 15.2, top: 16.8, standR: 0.45 });
     fx.addGlow(d.clone().multiplyScalar(base + 14.4), 0xffe7a0, 9);
     game.updaters.push((dt, gm) => {
       beamPivot.rotation.y += dt * 0.8;
@@ -409,15 +462,17 @@ export async function buildWorld(game) {
       const a = rand() * 6.28, r = 2 + rand() * 7;
       const d = offsetDir(L, Math.cos(a) * r, Math.sin(a) * r);
       if (sample(d) > -0.5) continue;
-      const m = surfaceMatrix(d, { yaw: rand() * 6, scale: 4 + rand() * 2, height: 0.05 });
+      const yaw = rand() * 6, sc = 4 + rand() * 2;
+      const m = surfaceMatrix(d, { yaw, scale: sc, height: 0.05 });
       scatter.add(P(i % 3 ? 'lily_large' : 'lily_small'), m, { shadow: false });
-      if (i % 3 === 0) colliders.add({ pos: d.clone().multiplyScalar(R - 3), r: 0.9, top: 3.1 }); // hop across pads
+      // every pad can be climbed onto from the water and hopped across
+      colliders.add({ pos: d.clone().multiplyScalar(R - 3), r: (i % 3 ? 0.14 : 0.1) * sc, top: 3.1 });
     }
     // dock on the lake
     buildPier(L, -1, 0.2, 7);
-    prop('canoe', at('lake', 13, -3), { scale: 4, yaw: 1, collide: 1.2, top: 0.5 });
+    prop('canoe', at('lake', 13, -3), { scale: 4, yaw: 1, collide: 'mesh' });
     addBench(at('lake', 14, 6), 2.2);
-    prop('town/watermill', at('lake', -16, 4), { scale: 3, collide: 2.5, yaw: 1.4 });
+    prop('town/watermill', at('lake', -16, 4), { scale: 3, collide: 'mesh', yaw: 1.4 });
   }
 
   // ---------------------------------------------------------------- Windmill Farm
@@ -440,11 +495,13 @@ export async function buildWorld(game) {
     g.position.copy(wd).multiplyScalar(base - 0.3);
     g.quaternion.copy(surfaceQuat(wd, 0.4));
     scene.add(g);
-    colliders.add({ pos: wd.clone().multiplyScalar(base), r: 2.6, top: Infinity });
+    const wb = wd.clone().multiplyScalar(base - 0.3);
+    colliders.add({ pos: wb, r: 2.6, rt: 1.6, top: 9 }); // tapering tower
+    colliders.add({ pos: wb, r: 2.2, rt: 0.05, y0: 9, top: 11.4, standR: 0.45 }); // pointy cap (Stardrop on top)
     game.updaters.push((dt) => { rotor.rotation.x += dt * 0.7 * globalUniforms.uWind.value; });
     // barn & farmhouse
-    prop('houses/building-type-m', at('farm', 9, 7), { scale: 6.5, yaw: -2.2, collide: 4.6 });
-    prop('houses/building-type-h', at('farm', 11, -6), { scale: 6.5, yaw: -1.2, collide: 4.6 });
+    prop('houses/building-type-m', at('farm', 9, 7), { scale: 6.5, yaw: -2.2, collide: 'mesh' });
+    prop('houses/building-type-h', at('farm', 11, -6), { scale: 6.5, yaw: -1.2, collide: 'mesh' });
     // crops in rows
     const crops = ['crops_cornStageD', 'crops_wheatStageB', 'crop_pumpkin', 'crops_leafsStageB', 'crop_melon', 'crops_cornStageC'];
     for (let row = 0; row < 6; row++) {
@@ -457,11 +514,11 @@ export async function buildWorld(game) {
     for (let k = 0; k < 18; k++) {
       const a = (k / 18) * Math.PI * 2;
       const d = offsetDir(F, 2 + Math.cos(a) * 9, -16 + Math.sin(a) * 6);
-      prop('fence_simple', d, { scale: 4, yaw: -a, collide: 0.4, top: 1.0 });
+      prop('fence_simple', d, { scale: 4, yaw: -a, collide: 'mesh' });
     }
-    prop('town/cart-high', at('farm', 3, -2), { scale: 2.4, yaw: 2.4, collide: 1.2 });
+    prop('town/cart-high', at('farm', 3, -2), { scale: 2.4, yaw: 2.4, collide: 'mesh' });
     prop('survival/bucket', at('farm', 4, -3.5), { scale: 2.6 });
-    for (let i = 0; i < 3; i++) prop('log_stack', at('farm', 14 + i * 0.1, 1 + i * 2.2), { scale: 4, yaw: 1.6, collide: 0.9, top: 1.2 });
+    for (let i = 0; i < 3; i++) prop('log_stack', at('farm', 14 + i * 0.1, 1 + i * 2.2), { scale: 4, yaw: 1.6, collide: 'mesh' });
     addSign(at('farm', 0, 12), 'Windmill Farm  ·  Please close the gate (there is no gate)');
   }
 
@@ -470,7 +527,7 @@ export async function buildWorld(game) {
     const M = regionById.meadow.dir;
     addBench(at('meadow', -2, -8), 0.4);
     // beehives (barrels)
-    for (let i = 0; i < 3; i++) prop('survival/barrel', at('meadow', -10 + i * 1.6, 2), { scale: 2.6, collide: 0.5, top: 1.0 });
+    for (let i = 0; i < 3; i++) prop('survival/barrel', at('meadow', -10 + i * 1.6, 2), { scale: 2.6, collide: 'mesh' });
     buildBalloon(at('meadow', 12, 1));
     addSign(at('meadow', 5, 6), 'Bloom Meadow  ·  Hot air balloon: round-the-world tours, departing whenever you like');
   }
@@ -506,14 +563,14 @@ export async function buildWorld(game) {
     const baseR = R + sample(home);
     const st = { flying: false, t: 0, obj: g };
     const axis = new THREE.Vector3().crossVectors(home, new THREE.Vector3(0.3, 1, 0.2).normalize()).normalize();
-    const homeCol = colliders.add({ pos: home.clone().multiplyScalar(baseR), r: 1.3, top: 1.1 });
-    const it = addInteract({ get pos() { return g.position; }, radius: 3.0, label: 'Board balloon', action: () => {
+    const homeCol = colliders.add({ pos: home.clone().multiplyScalar(baseR), r: 1.0, rt: 1.2, top: 1.1 });
+    const it = addInteract({ get pos() { return g.position; }, radius: 3.0, label: 'Board balloon', icon: '🎈', action: () => {
       const p = game.player;
       st.flying = true; st.t = 0; p.mode = 'ride';
       p.anim.play('idle', 0.2);
       it.enabled = false;
       homeCol.removed = true;
-      ui.toast('Up, up and away! (SPACE to jump out)');
+      ui.toast(IS_TOUCH ? 'Up, up and away! (tap Jump out to leap)' : 'Up, up and away! (SPACE to jump out)');
       audio.discover();
     } });
     world.balloon = st;
@@ -545,7 +602,7 @@ export async function buildWorld(game) {
           p.vel.copy(f).multiplyScalar(6);
           p.speed = 6;
           gm.input.pressed.delete('Space');
-          ui.toast(p.hasGlider ? 'Hold SPACE to open your parasol!' : 'Wheee! (You might want a parasol next time...)');
+          ui.toast(p.hasGlider ? '{Hold SPACE} to open your parasol!' : 'Wheee! (You might want a parasol next time...)');
         }
       }
     });
@@ -554,10 +611,10 @@ export async function buildWorld(game) {
   // ---------------------------------------------------------------- Whisperwood camp
   {
     const cd = at('forest', -7, -8);
-    prop('campfire_stones', cd, { scale: 4, collide: 0.8, top: 0.4 });
-    prop('campfire_logs', cd, { scale: 4 });
-    prop('tent_detailedOpen', at('forest', -12, -3), { scale: 5, yaw: 2.4, collide: 1.8 });
-    prop('tent_smallClosed', at('forest', -3, -13), { scale: 5, yaw: -0.3, collide: 1.5 });
+    prop('campfire_stones', cd, { scale: 4, collide: 'mesh' });
+    prop('campfire_logs', cd, { scale: 4, collide: false });
+    prop('tent_detailedOpen', at('forest', -12, -3), { scale: 5, yaw: 2.4, collide: 'mesh' });
+    prop('tent_smallClosed', at('forest', -3, -13), { scale: 5, yaw: -0.3, collide: 'mesh' });
     const fire = fx.addGlow(surfPos(cd, 0.8), 0xff8a3a, 3.5);
     fire.userData.always = true;
     game.updaters.push((dt, gm) => {
@@ -581,18 +638,19 @@ export async function buildWorld(game) {
       const o = makeObject('nature/' + path);
       o.scale.setScalar(s);
       o.position.copy(surfPos(d, -0.1));
-      o.quaternion.copy(surfaceQuat(d, rand() * 6));
+      const yaw = rand() * 6;
+      o.quaternion.copy(surfaceQuat(d, yaw));
       scene.add(o);
-      const capTop = 0.2 * s * 0.92;
-      const col = colliders.add({
-        pos: surfPos(d), r: 0.1 * s, top: capTop,
+      const capTop = getModel('nature/' + path).box.max.y * s - 0.1;
+      // collider straight from the mesh: walk under the cap, bounce off wherever you land on it
+      const col = colliders.add(modelCollider('nature/' + path, surfPos(d, -0.1), d, {
+        yaw, scale: s,
         onLand: (p) => {
           p.vUp = 15 + s * 0.12; p.onGround = false; p.mode = 'walk';
           audio.bounce();
           bounce.t = 0.35; bounce.o = o; bounce.s = s;
         },
-      });
-      colliders.add({ pos: surfPos(d), r: 0.025 * s, top: capTop - 0.6 }); // stem
+      }));
       const glow = fx.addGlow(surfPos(d, capTop + 0.5), i % 2 ? 0xff7fbf : 0x9fd8ff, s * 0.35);
       caps.push(col);
     }
@@ -612,17 +670,18 @@ export async function buildWorld(game) {
     const top = regionById.mountain.dir;
     const base = R + sample(top);
     // flatten-ish platform
+    // low enough to just walk up onto (STEP)
     const plat = new THREE.Mesh(new THREE.CylinderGeometry(7, 7.6, 1.2, 20), toonMaterial({ color: 0xd8d0c4 }));
-    plat.position.copy(top).multiplyScalar(base + 0.05);
+    plat.position.copy(top).multiplyScalar(base - 0.15);
     plat.quaternion.copy(surfaceQuat(top));
     plat.castShadow = plat.receiveShadow = true;
     scene.add(plat);
-    colliders.add({ pos: top.clone().multiplyScalar(base - 2), r: 7.2, top: 2.65 });
-    const deckH = 0.7;
+    colliders.add({ pos: top.clone().multiplyScalar(base - 2), r: 7.6, rt: 7.0, top: 2.45 });
+    const deckH = 0.45;
     for (let i = 0; i < 8; i++) {
       const a = (i / 8) * Math.PI * 2;
       const d = offsetDir(top, Math.cos(a) * 6, Math.sin(a) * 6);
-      prop(i % 3 === 2 ? 'statue_columnDamaged' : 'statue_column', d, { scale: 4.5, height: base - R + deckH, collide: 0.6, top: Infinity });
+      prop(i % 3 === 2 ? 'statue_columnDamaged' : 'statue_column', d, { scale: 4.5, height: base - R + deckH, collide: 'mesh' });
     }
     // bells
     const bellMat = toonMaterial({ color: 0xe8b84a });
@@ -643,8 +702,9 @@ export async function buildWorld(game) {
       g.quaternion.copy(surfaceQuat(d, a));
       g.traverse((o) => { if (o.isMesh) o.castShadow = true; });
       scene.add(g);
+      colliders.add({ pos: d.clone().multiplyScalar(base + deckH), r: 0.2, top: 3.25 }); // post
       const st = { swing: 0 };
-      addInteract({ pos: d.clone().multiplyScalar(base + deckH + 1), radius: 2.6, label: 'Ring bell', action: () => {
+      addInteract({ pos: d.clone().multiplyScalar(base + deckH + 1), radius: 2.6, label: 'Ring bell', icon: '🔔', action: () => {
         audio.chime(notes[i]); st.swing = 1;
         fx.sparkle(g.localToWorld(new THREE.Vector3(1.3, 2.6, 0)), 8, 0xffe08a);
       } });
@@ -653,7 +713,7 @@ export async function buildWorld(game) {
         pivot.rotation.z = Math.sin(gm.time * 8) * 0.35 * st.swing;
       });
     }
-    prop('statue_obelisk', top, { scale: 5, height: base - R + deckH, collide: 0.8 });
+    prop('statue_obelisk', top, { scale: 5, height: base - R + deckH, collide: 'mesh' });
     fx.addGlow(top.clone().multiplyScalar(base + 6), 0xbfe8ff, 5);
     addSign(at('mountain', -6, -24), 'Mount Hush  ·  The temple is at the top  ·  Jump the ledges if you get stuck');
   }
@@ -661,12 +721,12 @@ export async function buildWorld(game) {
   // ---------------------------------------------------------------- Old Ruins & singing stones
   {
     const O = regionById.ruins.dir;
-    prop('statue_head', at('ruins', 0, 14), { scale: 9, yaw: Math.PI, collide: 3.2 });
-    prop('statue_ring', at('ruins', -14, -4), { scale: 7, yaw: 1, collide: 1 });
+    prop('statue_head', at('ruins', 0, 14), { scale: 9, yaw: Math.PI, collide: 'mesh' });
+    prop('statue_ring', at('ruins', -14, -4), { scale: 7, yaw: 1, collide: 'mesh' });
     for (let i = 0; i < 10; i++) {
       const a = (i / 10) * Math.PI * 2;
       const d = offsetDir(O, Math.cos(a) * 11, Math.sin(a) * 11);
-      prop(i % 3 ? 'statue_columnDamaged' : 'statue_column', d, { scale: 4.5 + (i % 3), yaw: a, collide: 0.6 });
+      prop(i % 3 ? 'statue_columnDamaged' : 'statue_column', d, { scale: 4.5 + (i % 3), yaw: a, collide: 'mesh' });
     }
     // seven singing stones in a winding line
     const scale = [261.63, 293.66, 329.63, 349.23, 392.0, 440.0, 493.88];
@@ -707,9 +767,9 @@ export async function buildWorld(game) {
     const meteor = new THREE.Mesh(new THREE.IcosahedronGeometry(2.4, 0), toonMaterial({ color: 0x7b6fb8, emissive: 0x5d4fd0, emissiveIntensity: 0.4 }));
     meteor.position.copy(surfPos(C, 1.2)); meteor.quaternion.copy(surfaceQuat(C)); meteor.castShadow = true;
     scene.add(meteor);
-    colliders.add({ pos: surfPos(C), r: 2.2, top: 3.0 });
+    colliders.add({ shape: 'sphere', pos: surfPos(C), r: 2.4, cy: 1.2 });
     const glow = fx.addGlow(surfPos(C, 2), 0xa48cff, 8); glow.userData.always = true;
-    addInteract({ pos: meteor.position, radius: 4, label: 'Touch the stone', action: () => {
+    addInteract({ pos: meteor.position, radius: 4, label: 'Touch the stone', icon: '✋', action: () => {
       audio.chime(392); audio.chime(587.33);
       fx.sparkle(surfPos(C, 3.5), 30, 0xb59cff);
       for (let i = 0; i < 6; i++) setTimeout(() => fx.shootingStar(game), i * 150);
@@ -728,8 +788,8 @@ export async function buildWorld(game) {
     tube.position.y = 2.0; tube.rotation.x = -0.9; tg.add(tube);
     tg.position.copy(surfPos(td)); tg.quaternion.copy(surfaceQuat(td, 2)); tg.traverse((o) => { o.castShadow = true; });
     scene.add(tg);
-    colliders.add({ pos: surfPos(td), r: 0.6, top: Infinity });
-    addInteract({ pos: surfPos(td, 1.5), radius: 2.5, label: 'Look', action: () => {
+    colliders.add({ pos: surfPos(td), r: 0.45, top: 2.6 });
+    addInteract({ pos: surfPos(td, 1.5), radius: 2.5, label: 'Look', icon: '🔭', action: () => {
       if (game.sky.night > 0.5) ui.dialogue('Telescope', ['So many stars! One of them winks at you. Rude.', 'You spot a tiny planet far away. Someone there is looking back.'], 0, null);
       else ui.dialogue('Telescope', ['You see... the sky. Very blue. Try again at night.'], 0, null);
     } });
@@ -744,13 +804,19 @@ export async function buildWorld(game) {
     tunnel.rotation.z = Math.PI / 2; tunnel.rotation.y = Math.PI / 2; tunnel.position.set(0, 0, 3.2);
     ig.add(tunnel);
     scene.add(ig);
-    colliders.add({ pos: surfPos(fd), r: 3.2, top: 3.0 });
+    // a dome you can scramble up (there's a Stardrop on top), plus the entrance tunnel
+    colliders.add({ shape: 'sphere', pos: surfPos(fd), r: 3.2, cy: -0.2, step: 1.0 });
+    const iq = surfaceQuat(fd);
+    colliders.add({
+      pos: surfPos(fd), up: fd.clone(), ax: new THREE.Vector3(1, 0, 0).applyQuaternion(iq), az: new THREE.Vector3(0, 0, 1).applyQuaternion(iq),
+      hx: 1.1, hz: 1.2, cz: 3.2, top: 0.85, step: 1.0,
+    });
     prop('survival/fish-large', at('frost', 3, -1), { scale: 3 });
     prop('survival/bucket', at('frost', 3.6, -2), { scale: 2.6 });
     addSign(at('frost', 0, 8), 'Frostcap  ·  Population: 1 human, many penguins');
 
-    prop('survival/tent-canvas', at('desert', -8, 2), { scale: 2.8, yaw: 0.5, collide: 2.2 });
-    prop('survival/campfire-pit', at('desert', -5, 0), { scale: 2.8, collide: 0.8, top: 0.5 });
+    prop('survival/tent-canvas', at('desert', -8, 2), { scale: 2.8, yaw: 0.5, collide: 'mesh' });
+    prop('survival/campfire-pit', at('desert', -5, 0), { scale: 2.8, collide: 'mesh' });
     addSign(at('desert', 0, 12), 'Sunscorch Dunes  ·  Hydrate!');
 
     // Oasis palms ring
@@ -766,8 +832,8 @@ export async function buildWorld(game) {
     chestObj.scale.setScalar(3.4);
     chestObj.position.copy(surfPos(cd)); chestObj.quaternion.copy(surfaceQuat(cd, 0.7));
     scene.add(chestObj);
-    colliders.add({ pos: surfPos(cd), r: 0.6, top: 0.65 });
-    addInteract({ pos: surfPos(cd, 0.4), radius: 2.5, label: 'Open chest', action: () => {
+    colliders.add(modelCollider('survival/chest', surfPos(cd), cd, { yaw: 0.7, scale: 3.4 }));
+    addInteract({ pos: surfPos(cd, 0.4), radius: 2.5, label: 'Open chest', icon: '🗝️', action: () => {
       if (save.has('stars', 'isle-chest') || world.stars.find((s) => s.id === 'isle-chest')) { ui.toast('Empty. Except for a little sand. And a crab. Hi crab.'); return; }
       audio.discover();
       ui.toast('Treasure! A Stardrop!', 'star');
@@ -914,24 +980,25 @@ export async function buildWorld(game) {
         const sp = b.vel.length();
         b.pos.addScaledVector(b.vel, dt);
         b.vUp -= 20 * dt;
+        const prevR = b.pos.length() - 0.55;
         let r = b.pos.length() + b.vUp * dt;
         const nd = b.pos.clone().normalize();
         const gh = sample(nd);
-        const floor = R + Math.max(gh, -0.5) + 0.55;
+        // bounce off props (the ball's "feet" are its bottom) and roll along their tops
+        const feet = nd.clone().multiplyScalar(r - 0.55);
+        const res = resolve(gm.colliders, feet, 0.55, { height: 1.1, step: 0.3, prevR });
+        if (res.push.lengthSq() > 1e-8) {
+          const nrm = res.push.clone().normalize();
+          const vn = b.vel.dot(nrm);
+          if (vn < 0) b.vel.addScaledVector(nrm, -2 * vn).multiplyScalar(0.7);
+        }
+        nd.copy(feet).normalize();
+        r = feet.length() + 0.55;
+        const floor = Math.max(R + Math.max(gh, -0.5), res.floor) + 0.55;
         if (r < floor) { r = floor; if (b.vUp < -2) b.vUp = -b.vUp * 0.55; else b.vUp = 0; }
         b.pos.copy(nd).multiplyScalar(r);
         if (gh < 0) b.vUp += 10 * dt; // floats
         b.vel.multiplyScalar(1 - dt * (r <= floor + 0.05 ? 1.2 : 0.2));
-        // bump into colliders
-        const res = gm.colliders.near(b.pos);
-        for (const c of res) {
-          const dd = b.pos.clone().sub(c.pos); dd.addScaledVector(c.up, -dd.dot(c.up));
-          if (dd.length() < c.r + 0.55 && b.pos.length() < c.base + c.top) {
-            const nrm = dd.normalize();
-            b.pos.addScaledVector(nrm, c.r + 0.55 - b.pos.clone().sub(c.pos).addScaledVector(c.up, -b.pos.clone().sub(c.pos).dot(c.up)).length());
-            b.vel.addScaledVector(nrm, -2 * b.vel.dot(nrm)).multiplyScalar(0.7);
-          }
-        }
         b.g.position.copy(b.pos);
         if (sp > 0.01) {
           const axis = new THREE.Vector3().crossVectors(up, b.vel).normalize();
@@ -1031,7 +1098,9 @@ export async function buildWorld(game) {
         const d = offsetDir(reg.dir, Math.cos(a / 12 * 6.283) * r, Math.sin(a / 12 * 6.283) * r);
         if (sample(d) <= 0.8) continue;
         const pos = surfPos(d);
-        const blocked = colliders.near(pos).some((c) => !c.removed && c.top > 1 && c.pos.distanceTo(pos) < c.r + 1);
+        const test = pos.clone();
+        const res = resolve(colliders, test, 1.0);
+        const blocked = test.distanceToSquared(pos) > 1e-4 || res.floor > pos.length() + 0.6;
         if (!blocked) { target = d; break outer; }
       }
     }
@@ -1041,7 +1110,7 @@ export async function buildWorld(game) {
     requestAnimationFrame(() => veil.classList.add('on'));
     setTimeout(() => {
       const p = game.player;
-      if (world.boat.riding) { world.boat.riding = false; world.boat.interact.enabled = true; }
+      if (world.boat.riding) { world.boat.riding = false; world.boat.interact.enabled = true; world.boat.landing = null; }
       p.mode = 'walk';
       p.place(target, p.facing);
       game.follow.snap(p);

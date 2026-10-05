@@ -31,7 +31,18 @@ The build is fully static, so `dist/` can be hosted anywhere. A GitHub Pages wor
 | P | Photo mode (hides the UI) |
 | M | Mute · H: help |
 
-Touch devices get an on-screen joystick plus jump and interact buttons.
+On phones and tablets:
+
+| Touch | Action |
+| --- | --- |
+| Left side of the screen | Floating joystick: touch anywhere and drag to walk, push all the way to run |
+| JUMP | Jump · hold while falling to glide |
+| Pop-up button (above JUMP) | Appears when something's nearby: Talk, Pet, Sit, Read, Row, Board, Ring… and Stand up / Hop out / Jump out while sitting, rowing or flying. The floating label over the target can be tapped too |
+| Drag (right side) · Pinch | Orbit camera · zoom |
+| 📖 📷 🔊 ? | Journal, photo mode (tap **✕ Done** to leave), sound, help |
+
+Starting the game on a phone goes fullscreen where the browser allows it. Add `?touch=1` (or `?touch=0`) to the
+URL to force the touch controls on or off.
 
 ## What's on the planet
 
@@ -61,6 +72,12 @@ music and sound effects. Progress is saved in your browser.
   grass sway in the wind and bend around the player; anything between the camera and player dithers away.
 - **Movement**: spherical-gravity character controller with slope limits, standable props, swimming and
   gliding (`src/player.js`); a camera that orbits in the player's curved local frame (`src/camera.js`).
+  You slide along walls and cliffs instead of sticking, step up small ledges, and can climb out of the water
+  onto lily pads.
+- **Collision**: props collide using a heightfield built from their own mesh at load time (`getHeightfield`
+  in `src/assets.js`). Each cell stores its top and underside, so walls are where you see them, roofs and
+  caps can be stood on, and eaves and mushroom caps can be walked under. Hand-placed structures use
+  cylinders, cones, boxes and domes (`src/collision.js`).
 - **Audio**: everything is synthesised live with WebAudio (`src/audio.js`) — no sound files.
 
 ## Credits
