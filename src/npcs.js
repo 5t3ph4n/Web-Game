@@ -1,12 +1,12 @@
 import * as THREE from 'three';
 import { R, sample, regionById, tangentBasis } from './planet.js';
-import { makeCharacter, makeAnimal } from './character.js';
+import { makeCharacter, makeAnimal, ANIMAL_HEIGHT } from './character.js';
 import { orient, tangent } from './player.js';
 import { resolve } from './collision.js';
 import { NPCS, CRITTERS, CRITTER_NAMES } from './content.js';
 import { mulberry32 } from './noise.js';
 
-const _t1 = new THREE.Vector3(), _t2 = new THREE.Vector3(), _v = new THREE.Vector3();
+const _t1 = new THREE.Vector3(), _t2 = new THREE.Vector3(), _v = new THREE.Vector3(), _from = new THREE.Vector3();
 
 export function offsetDir(center, east, north, out = new THREE.Vector3()) {
   tangentBasis(center, _t1, _t2);
@@ -54,14 +54,30 @@ class Walker {
     const nd = np.clone().normalize();
     const nh = sample(nd);
     if (nh < this.minH || nh > this.maxH) return false;
+    const before = _from.copy(this.pos);
+    const prevR = this.pos.length();
     this.pos.copy(nd).multiplyScalar(R + nh + this.lift);
     if (colliders) {
-      const res = resolve(colliders, this.pos, 0.4, this.pos.length());
+      // keep walking along the top of whatever we were on (a platform, a pier) rather than diving under it
+      if (prevR > this.pos.length()) this.pos.setLength(prevR);
+      const res = resolve(colliders, this.pos, 0.4, { prevR });
       const gd = this.pos.clone().normalize();
       const gr = Math.max(R + sample(gd) + this.lift, res.floor);
       this.pos.copy(gd).multiplyScalar(gr);
+      // walking into a wall? give up on this target after a moment instead of moonwalking forever
+      if (res.push.lengthSq() > 0 && this.pos.distanceTo(before) < speed * dt * 0.5) {
+        this.stuck = (this.stuck || 0) + dt;
+        if (this.stuck > 0.8) { this.stuck = 0; return false; }
+      } else this.stuck = 0;
     }
     return true;
+  }
+  /** Step out of anything we spawned inside, onto whatever low thing is under us (temple platform, pier…). */
+  settle(colliders) {
+    const res = resolve(colliders, this.pos, 0.35, { step: 1.0 });
+    if (res.floor > this.pos.length()) this.pos.setLength(res.floor);
+    this.home.copy(this.pos).normalize();
+    this.sync();
   }
   faceToward(p, dt) {
     this.up.copy(this.pos).normalize();
@@ -90,8 +106,11 @@ export class NPC extends Walker {
     const dist = this.pos.distanceTo(p.pos);
     this.near = dist;
     if (this.talking) {
-      this.faceToward(p.pos, dt);
-      if (this.def.behavior !== 'sit') this.anim.play(this.lock > 0 ? 'emote-yes' : 'idle', 0.3);
+      // people on benches stay seated facing forward instead of swivelling sideways on the seat
+      if (this.def.behavior !== 'sit') {
+        this.faceToward(p.pos, dt);
+        this.anim.play(this.lock > 0 ? 'emote-yes' : 'idle', 0.3);
+      }
       this.lock -= dt;
     } else if (this.def.behavior === 'sit') {
       this.anim.play('sit', 0.3);
@@ -179,9 +198,11 @@ export async function buildPeople(game, fx) {
     const anim = await makeCharacter(def.skin);
     const sitting = def.behavior === 'sit';
     const npc = new NPC(def, anim, home, { lift: sitting ? 0.0 : 0 });
+    npc.bodyR = 0.35;
     scene.add(anim.root);
     npcs.push(npc);
     if (sitting && game.world && game.world.addSeat) game.world.addSeat(npc);
+    else npc.settle(game.colliders);
     game.interactables.push({
       get pos() { return npc.pos; },
       radius: 3.2,
@@ -205,7 +226,7 @@ export async function buildPeople(game, fx) {
       if (def.gives === 'glider' && !game.player.hasGlider) {
         game.player.hasGlider = true;
         save.data.glider = true; save.write();
-        ui.toast('Got the Parasol! Hold SPACE while falling to glide.', 'parasol');
+        ui.toast('Got the Parasol! {Hold SPACE} while falling to glide.', 'parasol');
         audio.discover();
       }
       if (save.add('friends', def.id)) {
@@ -236,6 +257,10 @@ export async function buildPeople(game, fx) {
           wander: type === 'crab' ? 5 : 10, speed: type === 'caterpillar' ? 0.4 : type === 'elephant' || type === 'cow' ? 1.0 : 1.6,
           runSpeed: type === 'bunny' || type === 'deer' ? 8 : 6, lift: flyer ? 1.6 : 0, minH: type === 'crab' ? 0.1 : 0.5,
         });
+        // bigger animals are solid; little ones you can step around/through
+        const h = ANIMAL_HEIGHT[type] || 1;
+        c.bodyR = flyer || h < 0.9 ? 0 : type === 'giraffe' ? 0.6 : Math.min(1.0, h * 0.33);
+        c.settle(game.colliders);
         scene.add(anim.root);
         critters.push(c);
         animalCount++;
@@ -265,17 +290,37 @@ export async function buildPeople(game, fx) {
   }
 
   function update(dt) {
-    const pp = game.player.pos;
+    const p = game.player, pp = p.pos;
     for (const n of npcs) {
       const d2 = n.pos.distanceToSquared(pp);
       n.anim.root.visible = d2 < 110 * 110;
       if (d2 < 90 * 90) n.update(dt, game, rand);
+      if (d2 < 9) bodyBlock(n, dt);
     }
     for (const c of critters) {
       const d2 = c.pos.distanceToSquared(pp);
       c.anim.root.visible = d2 < 65 * 65;
       if (d2 < 65 * 65) c.update(dt, game, rand);
+      if (d2 < 9 && c.bodyR > 0) bodyBlock(c, dt);
     }
+  }
+
+  // people and big animals are solid: nudge the player out of them (softly, so it never feels like a snag)
+  const _off = new THREE.Vector3();
+  function bodyBlock(w, dt) {
+    const p = game.player;
+    if (p.mode !== 'walk' && p.mode !== 'glide') return;
+    _off.copy(p.pos).sub(w.pos);
+    const vert = _off.dot(p.up);
+    if (Math.abs(vert) > 1.5) return;
+    _off.addScaledVector(p.up, -vert);
+    const d = _off.length(), min = w.bodyR + p.radius;
+    if (d >= min) return;
+    if (d < 1e-3) _off.copy(w.facing).negate(); else _off.divideScalar(d);
+    p.pos.addScaledVector(_off, (min - d) * Math.min(1, dt * 14));
+    const vn = p.vel.dot(_off);
+    if (vn < 0) p.vel.addScaledVector(_off, -vn * 0.5);
+    p.sync();
   }
 
   return { npcs, critters, update, pet };

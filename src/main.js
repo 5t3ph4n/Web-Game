@@ -87,6 +87,8 @@ async function boot() {
   const spawn = world.spawn;
   if (save.data.pos) {
     player.place(new THREE.Vector3().fromArray(save.data.pos), new THREE.Vector3().fromArray(save.data.facing || [0, 0, 1]));
+    // back on top of the roof / pier / platform you were standing on
+    if (save.data.posR > player.pos.length()) player.pos.setLength(save.data.posR + 0.05);
   } else player.place(spawn.dir, spawn.facing);
   player.hasGlider = !!save.data.glider;
   follow.snap(player);
@@ -157,6 +159,7 @@ async function boot() {
     if (saveT > 5) {
       saveT = 0;
       save.data.pos = player.pos.clone().normalize().toArray();
+      save.data.posR = player.onGround && player.mode === 'walk' ? player.pos.length() : 0;
       save.data.facing = player.facing.toArray();
       save.data.time = sky.time;
       save.write();

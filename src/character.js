@@ -68,7 +68,7 @@ export async function makeCharacter(skin, height = 1.75) {
   return new Animated(gltf, height);
 }
 
-const ANIMAL_HEIGHT = {
+export const ANIMAL_HEIGHT = {
   beaver: 0.9, bee: 0.6, bunny: 0.8, cat: 0.8, caterpillar: 0.5, chick: 0.55, cow: 1.7, crab: 0.55, deer: 1.8,
   dog: 0.95, elephant: 3.0, fish: 0.6, fox: 0.95, giraffe: 4.2, hog: 1.1, koala: 0.9, lion: 1.5, monkey: 1.0,
   panda: 1.4, parrot: 0.7, penguin: 0.9, pig: 1.0, polar: 1.8, tiger: 1.5,

@@ -1,12 +1,17 @@
 import * as THREE from 'three';
-import { R, sample } from './planet.js';
-import { resolve } from './collision.js';
+import { R, sample, normalAt } from './planet.js';
+import { resolve, STEP } from './collision.js';
 import { toonMaterial } from './toon.js';
 
 const _m = new THREE.Matrix4();
 const _right = new THREE.Vector3();
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
+const _up = new THREE.Vector3();
+const _n = new THREE.Vector3();
+
+const AIR_STEP = 1.0; // how far below a ledge you can be mid-jump and still pull yourself up onto it
+const SWIM_STEP = 1.2; // climb out of the water onto anything up to ~25cm above the surface (lily pads, boats)
 
 /** Orient an object so +Y = up and +Z = forward. */
 export function orient(obj, up, forward) {
@@ -46,6 +51,8 @@ export class Player {
     this.speed = 0;
     this.stepT = 0;
     this.coyote = 0;
+    this.jumpBuf = 0;
+    this.lastFloorC = null;
     this.lastGroundH = 0;
     this.airTime = 0;
     this.bounce = 0;
@@ -116,12 +123,14 @@ export class Player {
     }
     this.speed = this.vel.length();
 
-    // jumping / gliding
+    // jumping / gliding (a press just before landing still counts)
     if (this.onGround) this.coyote = 0.12; else this.coyote -= dt;
-    if (input.hit('Space') && (this.coyote > 0 || swimming)) {
+    this.jumpBuf = input.hit('Space') ? 0.15 : this.jumpBuf - dt;
+    if (this.jumpBuf > 0 && (this.coyote > 0 || swimming)) {
       this.vUp = swimming ? 6.5 : 8.6;
       this.onGround = false;
       this.coyote = 0;
+      this.jumpBuf = 0;
       this.mode = 'walk';
       this.anim.play('jump', 0.08, { once: true, timeScale: 1.4 });
       this.audio && this.audio.jump();
@@ -130,37 +139,37 @@ export class Player {
     this.mode = gliding ? 'glide' : this.mode === 'glide' ? 'walk' : this.mode;
     this.parasol.visible = gliding;
 
-    // integrate tangential motion (move along the sphere)
-    const curH = sample(up);
-    const step = _v.copy(this.vel).multiplyScalar(dt);
-    if (step.lengthSq() > 0) {
-      const newPos = _v2.copy(this.pos).add(step);
-      const nd = newPos.clone().normalize();
-      const nh = sample(nd);
-      const rise = nh - Math.max(curH, this.feetR - R);
-      const slope = rise / Math.max(step.length(), 1e-4);
-      if (this.onGround && rise > 0.18 && slope > 2.0) {
-        // too steep: slide along by cancelling the climbing part
-        this.vel.multiplyScalar(0.2);
-      } else {
-        const r = this.pos.length();
-        this.pos.copy(nd).multiplyScalar(r);
-      }
+    // integrate tangential motion (move along the sphere) in short substeps, so running can't tunnel into
+    // props, and slide along walls and cliffs instead of stopping dead
+    this.touching = null;
+    const onHit = (c) => {
+      this.touching = c;
+      if (c.onTouch) c.onTouch(this, c);
+    };
+    const opts = { step: swimming ? SWIM_STEP : STEP, vUp: this.vUp };
+    const n = Math.min(4, Math.ceil((this.vel.length() * dt) / 0.22));
+    for (let i = 0; i < n; i++) {
+      if (!this.moveStep(dt / n, swimming)) break;
+      const res = resolve(this.colliders, this.pos, this.radius, opts, onHit);
+      this.slide(res.push);
     }
 
     // vertical
     const g = gliding ? 7 : 24;
-    this.vUp -= g * dt;
+    this.vUp = Math.max(this.vUp - g * dt, -40);
     if (gliding && this.vUp < -2.2) this.vUp = -2.2;
-    let r = this.pos.length() + this.vUp * dt;
+    const prevR = this.pos.length();
+    let r = prevR + this.vUp * dt;
     this.pos.setLength(r);
 
-    // collisions with props (can stand on finite-height props)
-    this.touching = null;
-    const res = resolve(this.colliders, this.pos, this.radius, this.pos.length(), (c) => {
-      this.touching = c;
-      if (c.onTouch) c.onTouch(this, c);
-    });
+    // collisions with props: get pushed out, stand on tops, bump your head on undersides
+    opts.vUp = this.vUp; opts.prevR = prevR;
+    const res = resolve(this.colliders, this.pos, this.radius, opts, onHit);
+    this.slide(res.push);
+    if (res.ceil < this.pos.length()) {
+      this.pos.setLength(res.ceil);
+      if (this.vUp > 0) this.vUp = 0;
+    }
     const floorR = res.floor;
     this.floorC = res.floorC;
     const ud = this.pos.clone().normalize();
@@ -192,7 +201,12 @@ export class Player {
         }
         if (this.vUp <= 0) {
           this.vUp = 0; this.onGround = true;
-          if (this.floorC && this.floorC.onLand && !wasGround) this.floorC.onLand(this, this.floorC);
+          // landing on (or walking onto) something that reacts: bouncy caps, singing stones…
+          const c = this.floorC;
+          if (c && c.onLand && (!wasGround || c !== this.lastFloorC)) {
+            const now = performance.now();
+            if (now - (c.landT || 0) > 350) { c.landT = now; c.onLand(this, c); }
+          }
         }
       } else if (r > groundR + 0.25) {
         this.onGround = false;
@@ -201,10 +215,51 @@ export class Player {
         this.pos.setLength(groundR);
       }
     }
+    this.lastFloorC = this.onGround ? this.floorC : null;
     this.airTime = this.onGround ? 0 : this.airTime + dt;
 
     this.sync();
     this.animate(dt, running);
+  }
+
+  /** Move along the surface by vel*dt. Too-steep terrain makes the velocity slide along the slope instead. */
+  moveStep(dt, swimming) {
+    const up = _up.copy(this.pos).normalize();
+    const feetH = this.feetR - R;
+    const curH = sample(up);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const step = _v.copy(this.vel).multiplyScalar(dt);
+      const len = step.length();
+      if (len < 1e-6) return false;
+      const nd = _v2.copy(this.pos).add(step).normalize();
+      const nh = sample(nd);
+      const rise = nh - Math.max(curH, feetH);
+      const tooSteep = this.onGround
+        ? rise > 0.18 && rise / len > 2.0
+        : nh > feetH + (swimming ? SWIM_STEP : AIR_STEP); // in the air you can only mantle a small ledge
+      if (!tooSteep) {
+        const r = this.pos.length();
+        this.pos.copy(nd).multiplyScalar(r);
+        return true;
+      }
+      // the slope's downhill direction acts like a wall normal
+      normalAt(nd, _n);
+      _n.addScaledVector(nd, -_n.dot(nd));
+      const vn = this.vel.dot(_n);
+      if (_n.lengthSq() < 1e-8 || vn >= 0) { this.vel.multiplyScalar(0.2); return false; }
+      _n.normalize();
+      this.vel.addScaledVector(_n, -this.vel.dot(_n));
+    }
+    return false;
+  }
+
+  /** After being pushed out of a prop, drop the part of the velocity that keeps running into it. */
+  slide(push) {
+    const l = push.length();
+    if (l < 1e-6) return;
+    _n.copy(push).divideScalar(l);
+    const vn = this.vel.dot(_n);
+    if (vn < 0) this.vel.addScaledVector(_n, -vn);
   }
 
   animate(dt, running) {
