@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { R } from './planet.js';
 import { toonMaterial, globalUniforms } from './toon.js';
 import { mulberry32 } from './noise.js';
+import { REALISTIC, q } from './settings.js';
 
 const KEYS = [
   // t, skyTop, skyHorizon, sunColor, sunIntensity, ambient
@@ -78,22 +79,32 @@ export class Sky {
     scene.add(this.dome);
 
     // sun & moon sprites (simple discs)
-    this.sunMesh = new THREE.Mesh(new THREE.CircleGeometry(28, 24), new THREE.MeshBasicMaterial({ color: 0xfff4d0, fog: false, depthWrite: false }));
-    this.moonMesh = new THREE.Mesh(new THREE.CircleGeometry(18, 24), new THREE.MeshBasicMaterial({ color: 0xe8eeff, fog: false, depthWrite: false }));
+    this.sunMesh = new THREE.Mesh(new THREE.CircleGeometry(REALISTIC ? 16 : 28, 32), new THREE.MeshBasicMaterial({ color: 0xfff4d0, fog: false, depthWrite: false }));
+    if (REALISTIC) this.sunMesh.material.color.setRGB(9, 8, 6.5); // HDR so it blooms
+    this.moonMesh = new THREE.Mesh(new THREE.CircleGeometry(14, 32), new THREE.MeshBasicMaterial({ color: 0xe8eeff, fog: false, depthWrite: false }));
+    if (REALISTIC) this.moonMesh.material.color.setRGB(2.2, 2.3, 2.6);
     this.sunMesh.renderOrder = this.moonMesh.renderOrder = -9;
     scene.add(this.sunMesh, this.moonMesh);
 
     // lights
     this.sun = new THREE.DirectionalLight(0xffffff, 2.4);
     this.sun.castShadow = true;
-    this.sun.shadow.mapSize.set(2048, 2048);
+    this.sun.shadow.mapSize.set(q().shadow, q().shadow);
     const sc = this.sun.shadow.camera;
     sc.left = -45; sc.right = 45; sc.top = 45; sc.bottom = -45; sc.near = 1; sc.far = 260;
-    this.sun.shadow.bias = -0.0008;
-    this.sun.shadow.normalBias = 0.04;
+    this.sun.shadow.bias = -0.0004;
+    this.sun.shadow.normalBias = 0.05;
+    this.sun.shadow.radius = 3;
     scene.add(this.sun, this.sun.target);
     this.ambient = new THREE.AmbientLight(0xffffff, 1);
     scene.add(this.ambient);
+    // sky/ground bounce light; its "up" follows the player around the planet
+    this.hemi = new THREE.HemisphereLight(0xbfe5ff, 0x6d6450, 0);
+    scene.add(this.hemi);
+    this.envScene = new THREE.Scene();
+    this.envDome = new THREE.Mesh(new THREE.SphereGeometry(500, 32, 16), this.domeMat);
+    this.envScene.add(this.envDome);
+    this.envT = 0;
 
     scene.fog = new THREE.Fog(0xbfe5d8, 90, 260);
 
@@ -104,7 +115,8 @@ export class Sky {
   buildClouds() {
     // all cloud puffs live in one InstancedMesh (cheap: 1 draw call + 1 shadow call)
     const rand = mulberry32(99);
-    const mat = toonMaterial({ color: 0xffffff }, { fade: false });
+    const mat = toonMaterial({ color: 0xffffff, roughness: 1 }, { fade: false });
+    if (REALISTIC) { mat.emissive.setRGB(0.25, 0.27, 0.3); }
     this.cloudMat = mat;
     const puffs = [];
     const list = [];
@@ -167,6 +179,22 @@ export class Sky {
     this.scene.add(this.rain);
   }
 
+  /** Rebuild the image-based lighting from the current sky (realistic mode). */
+  updateEnv(renderer, dt) {
+    if (!REALISTIC) return;
+    this.envT -= dt;
+    if (this.envT > 0 && this.scene.environment) return;
+    this.envT = 2.5;
+    if (!this.pmrem) this.pmrem = new THREE.PMREMGenerator(renderer);
+    const oldPos = this.dome.position.clone();
+    const rt = this.pmrem.fromScene(this.envScene, 0, 1, 1200);
+    if (this.envRT) this.envRT.dispose();
+    this.envRT = rt;
+    this.scene.environment = rt.texture;
+    this.scene.environmentIntensity = 0.35;
+    this.dome.position.copy(oldPos);
+  }
+
   update(dt, ctx) {
     const { up, east, camPos, inSnow } = ctx;
     this.time = (this.time + dt / this.dayLength) % 1;
@@ -212,6 +240,14 @@ export class Sky {
     this.sun.intensity = sunI;
     this.ambient.color.copy(this.skyHorizon).lerp(new THREE.Color(1, 1, 1), 0.55);
     this.ambient.intensity = amb;
+    if (REALISTIC) {
+      this.sun.intensity = sunI * 1.25 * (1 - this.night * 0.6);
+      this.ambient.intensity = amb * 0.12 * (1 - this.night * 0.5);
+      this.hemi.position.copy(up);
+      this.hemi.color.copy(this.skyTop).lerp(new THREE.Color(1, 1, 1), 0.35);
+      this.hemi.groundColor.setHex(0x5f5a48).multiplyScalar(0.6 + (1 - this.night) * 0.4);
+      this.hemi.intensity = amb * 0.85 * (1 - this.night * 0.55);
+    }
 
     // dome
     const u = this.domeMat.uniforms;
@@ -228,8 +264,8 @@ export class Sky {
 
     this.fogColor.copy(this.skyHorizon).lerp(this.skyTop, 0.25);
     this.scene.fog.color.copy(this.fogColor);
-    this.scene.fog.far = 260 - this.rainAmt * 90;
-    this.scene.fog.near = 80 - this.rainAmt * 40;
+    this.scene.fog.far = (REALISTIC ? 330 : 260) - this.rainAmt * 110;
+    this.scene.fog.near = (REALISTIC ? 75 : 80) - this.rainAmt * 30;
 
     // clouds drift around the planet
     const shown = Math.floor(this.cloudList.length * (0.35 + this.cloudCover * 0.65));

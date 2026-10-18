@@ -269,7 +269,7 @@ export async function buildPeople(game, fx) {
     for (const n of npcs) {
       const d2 = n.pos.distanceToSquared(pp);
       n.anim.root.visible = d2 < 110 * 110;
-      if (d2 < 90 * 90) n.update(dt, game, rand);
+      if (d2 < 90 * 90) n.update(dt, game, rand); else n.near = Infinity;
     }
     for (const c of critters) {
       const d2 = c.pos.distanceToSquared(pp);

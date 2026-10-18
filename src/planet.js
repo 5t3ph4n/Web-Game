@@ -329,7 +329,7 @@ function terrainColor(d, h, nrm, info, out, tmp, tmp2) {
   // town plazas: warm cobbles with a subtle pattern
   if (info.plaza > 0) {
     const cob = noise(d.x * 260, d.y * 260, d.z * 260) > 0.25 ? 0.92 : 1.0;
-    out.lerp(tmp.setHex(0xd9cdb6).multiplyScalar(cob), info.plaza);
+    out.lerp(tmp.setHex(0xbdae96).multiplyScalar(cob), info.plaza);
   }
   // rock on steep slopes
   const rock = 1 - smoothstep(0.72, 0.86, slope);

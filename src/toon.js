@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { REALISTIC } from './settings.js';
 
 // Shared uniforms used by all animated materials
 export const globalUniforms = {
@@ -53,11 +54,115 @@ export function getGradientMap() {
   return gradientMap;
 }
 
+/**
+ * The game's base material. Realistic mode uses physically based shading;
+ * storybook mode uses the original cel ramp.
+ */
 export function toonMaterial(params = {}, { fade = true } = {}) {
-  const m = new THREE.MeshToonMaterial({ gradientMap: getGradientMap(), ...params });
+  const m = REALISTIC
+    ? new THREE.MeshStandardMaterial({ roughness: 0.82, metalness: 0, ...params })
+    : new THREE.MeshToonMaterial({ gradientMap: getGradientMap(), ...stripPBR(params) });
   if (fade) addOccluderFade(m);
   return m;
 }
+function stripPBR(p) {
+  const { roughness, metalness, envMapIntensity, ...rest } = p;
+  return rest;
+}
+
+// Materials whose glow follows the night (windows, lamps, mushrooms...)
+export const nightGlow = [];
+export function setNight(n) {
+  for (const g of nightGlow) g.material.emissiveIntensity = g.base + n * g.night;
+}
+
+/** Underwater caustics + wet sand darkening for the terrain (realistic mode). */
+export function addCaustics(material) {
+  const prev = material.onBeforeCompile;
+  const prevKey = material.customProgramCacheKey;
+  material.onBeforeCompile = (shader, r) => {
+    if (prev) prev.call(material, shader, r);
+    shader.uniforms.uTime = globalUniforms.uTime;
+    shader.uniforms.uSeaR = { value: 100 };
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vWorldP;')
+      .replace('#include <worldpos_vertex>', '#include <worldpos_vertex>\nvWorldP = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
+        {
+          // procedural bump: little lumps, pebbles and tufts so the ground isn't flat plastic
+          float hgt = tDetail(vWorldP);
+          vec3 dpx = dFdx(-vViewPosition), dpy = dFdy(-vViewPosition);
+          float dhx = dFdx(hgt), dhy = dFdy(hgt);
+          vec3 r1 = cross(dpy, normal), r2 = cross(normal, dpx);
+          float det = dot(dpx, r1);
+          vec3 grad = sign(det) * (dhx * r1 + dhy * r2);
+          float fadeB = 1.0 - smoothstep(15.0, 45.0, length(vViewPosition));
+          normal = normalize(abs(det) * normal - grad * 0.4 * fadeB);
+        }`)
+      .replace('#include <common>', `#include <common>
+        varying vec3 vWorldP; uniform float uTime; uniform float uSeaR;
+        float cHash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+        float tHash(vec3 p){ return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
+        float tNoise(vec3 p){ vec3 i = floor(p); vec3 f = fract(p); f = f*f*(3.0-2.0*f);
+          return mix(mix(mix(tHash(i), tHash(i+vec3(1,0,0)), f.x), mix(tHash(i+vec3(0,1,0)), tHash(i+vec3(1,1,0)), f.x), f.y),
+                     mix(mix(tHash(i+vec3(0,0,1)), tHash(i+vec3(1,0,1)), f.x), mix(tHash(i+vec3(0,1,1)), tHash(i+vec3(1,1,1)), f.x), f.y), f.z); }
+        float tDetail(vec3 p){ return tNoise(p * 1.7) * 0.5 + tNoise(p * 4.3) * 0.3 + tNoise(p * 11.0) * 0.2; }
+        float caustic(vec3 p){
+          vec2 uv = p.xz * 0.35 + p.y * 0.21;
+          float c = 0.0;
+          for (int i = 0; i < 3; i++) {
+            vec2 q = uv * (1.0 + float(i) * 0.7) + vec2(uTime * (0.3 + float(i) * 0.13), uTime * 0.21);
+            vec2 g = fract(q) - 0.5;
+            c += pow(1.0 - abs(sin((q.x + sin(q.y * 1.7 + uTime)) * 2.1) * cos((q.y + cos(q.x * 1.3 - uTime)) * 2.3)), 6.0);
+          }
+          return c / 3.0;
+        }`)
+      .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+        {
+          diffuseColor.rgb *= 0.86 + tDetail(vWorldP * 0.35) * 0.28;
+          float rr = length(vWorldP);
+          float under = smoothstep(uSeaR + 0.15, uSeaR - 0.4, rr);
+          float depthK = clamp((uSeaR - rr) / 10.0, 0.0, 1.0);
+          // wet sand band just above the waterline
+          float wet = smoothstep(uSeaR + 0.9, uSeaR + 0.1, rr) * (1.0 - under);
+          diffuseColor.rgb *= 1.0 - wet * 0.28;
+          // absorb reds with depth, add moving caustics
+          diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(0.55, 0.85, 0.95), under * (0.4 + depthK * 0.6));
+          totalEmissiveRadiance += vec3(0.75, 0.95, 1.0) * caustic(vWorldP) * under * (1.0 - depthK * 0.8) * 0.35;
+        }`);
+  };
+  material.customProgramCacheKey = () => (prevKey ? prevKey.call(material) : '') + 'caustics';
+  return material;
+}
+
+/** Turn light-blue window pixels of a colormap into a warm emissive map (lit at night). */
+const windowMaps = new Map();
+function windowEmissive(tex) {
+  if (windowMaps.has(tex)) return windowMaps.get(tex);
+  const img = tex.image;
+  if (!img || !img.width) return null;
+  const c = document.createElement('canvas');
+  c.width = img.width; c.height = img.height;
+  const g = c.getContext('2d');
+  g.drawImage(img, 0, 0);
+  const d = g.getImageData(0, 0, c.width, c.height);
+  const px = d.data;
+  for (let i = 0; i < px.length; i += 4) {
+    const r = px[i], gg = px[i + 1], b = px[i + 2];
+    const win = b > 170 && b > r + 35 && gg > 140 && gg < b + 10;
+    px[i] = win ? 255 : 0; px[i + 1] = win ? 196 : 0; px[i + 2] = win ? 112 : 0; px[i + 3] = 255;
+  }
+  g.putImageData(d, 0, 0);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.flipY = tex.flipY;
+  t.magFilter = THREE.NearestFilter;
+  windowMaps.set(tex, t);
+  return t;
+}
+
+const ROUGH = { water: 0.08, stone: 0.92, stoneDark: 0.95, leafsGreen: 0.7, leafsDark: 0.72, leafsFall: 0.7, grass: 0.8 };
 
 /** Adds instance-aware wind sway to a material. strength scales with local vertex height. */
 export function addWind(material, strength = 0.05, opts = {}) {
@@ -127,7 +232,7 @@ const PALETTE = {
 const toonCache = new Map();
 /** Convert a glTF standard material into a cel-shaded toon material (cached). */
 export function toonify(mat, opts = {}) {
-  const key = mat.uuid + (opts.wind ? 'w' + opts.wind : '') + (opts.emissive ? 'e' : '');
+  const key = mat.uuid + (opts.wind ? 'w' + opts.wind : '') + (opts.windows ? 'win' : '');
   if (toonCache.has(key)) return toonCache.get(key);
   const m = toonMaterial({
     color: mat.color ? mat.color.clone() : new THREE.Color(1, 1, 1),
@@ -145,6 +250,17 @@ export function toonify(mat, opts = {}) {
   if (PALETTE[mat.name] !== undefined && !m.map) m.color.setHex(PALETTE[mat.name]);
   // Slight pastel lift so things feel soft & sunny
   m.color.lerp(new THREE.Color(1, 1, 1), 0.06);
+  if (REALISTIC) {
+    m.roughness = ROUGH[mat.name] ?? 0.8;
+    if (opts.windows && m.map) {
+      const em = windowEmissive(m.map);
+      if (em) {
+        m.emissiveMap = em;
+        m.emissive.setRGB(1, 1, 1);
+        nightGlow.push({ material: m, base: 0, night: 2.2 });
+      }
+    }
+  }
   if (opts.wind) addWind(m, opts.wind);
   m.name = mat.name;
   toonCache.set(key, m);

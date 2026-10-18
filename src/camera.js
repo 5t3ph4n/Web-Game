@@ -42,7 +42,7 @@ export class FollowCam {
     }
     tangent(this.forward, up);
 
-    const lookH = player.mode === 'swim' ? 0.6 : 1.4;
+    const lookH = player.mode === 'dive' ? 1.0 : 1.4;
     const goal = player.pos.clone().addScaledVector(player.up, lookH);
     if (focus) goal.lerp(focus, 0.35);
     this.target.lerp(goal, Math.min(1, dt * 10));
@@ -51,8 +51,27 @@ export class FollowCam {
     const camPos = this.target.clone().addScaledVector(back, this.dist);
     // keep above terrain / water
     const cd = camPos.clone().normalize();
-    const minR = R + Math.max(sample(cd), 0) + 0.8;
+    const gh = sample(cd);
+    // underwater the camera may follow you down; otherwise it stays above the waves
+    const minR = player.mode === 'dive' ? R + gh + 0.6 : R + Math.max(gh, 0.35) + (player.mode === 'swim' ? 1.8 : 0.8);
     if (camPos.length() < minR) camPos.setLength(minR);
+    if (player.mode === 'dive' && camPos.length() > R - 0.3 && player.depth > 0.6) camPos.setLength(R - 0.3);
+    // don't let the camera sit inside houses, ships and big rocks
+    if (this.colliders) {
+      const v = new THREE.Vector3();
+      for (const c of this.colliders.near(camPos)) {
+        if (c.removed || c.passive || c.r < 1.2) continue;
+        v.copy(camPos).sub(c.pos);
+        const along = v.dot(c.up);
+        if (along < -1 || along > c.top + 0.3) continue;
+        v.addScaledVector(c.up, -along);
+        const d = v.length(), min = c.r + 0.5;
+        if (d < min) {
+          if (c.top !== Infinity && c.top < 6) camPos.addScaledVector(c.up, c.top + 0.4 - along);
+          else camPos.addScaledVector(d > 1e-4 ? v.divideScalar(d) : v.set(1, 0, 0), min - d);
+        }
+      }
+    }
     if (this.shake > 0) {
       this.shake = Math.max(0, this.shake - dt * 2);
       camPos.x += (Math.random() - 0.5) * this.shake * 0.3;

@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import { CHARACTER_SKINS, makeCharacter } from './character.js';
+import { CHARACTER_SKINS, PALETTES, HATS, FACES, BACKS, LABELS, defaultLook, randomLook } from './character.js';
+import { settings, saveSettings } from './settings.js';
 import { REGIONS } from './planet.js';
 import { NPCS, CRITTER_NAMES } from './content.js';
 
@@ -37,47 +38,36 @@ export class UI {
     this.loader.classList.add('err');
   }
 
-  /** Title screen with character picker. Resolves when the player presses Start. */
-  title(save, onSkin, renderStill) {
+  /** Title screen. Resolves when the player presses Start. */
+  title(save, renderStill) {
     this.loader.classList.add('fade');
     setTimeout(() => this.loader.remove(), 800);
     return new Promise((resolve) => {
-      let idx = Math.max(0, CHARACTER_SKINS.indexOf(save.data.skin || CHARACTER_SKINS[0]));
       const returning = save.data.places && save.data.places.length > 0;
       const el = $(`
         <div class="titlescreen">
           <div class="title-logo big">WANDERER</div>
           <div class="tagline">It's a big little planet. Go see all of it.</div>
-          <div class="picker">
-            <button class="arrow" data-d="-1" aria-label="Previous look">◀</button>
-            <div class="who">Pick your look<br><b>${idx + 1} / ${CHARACTER_SKINS.length}</b></div>
-            <button class="arrow" data-d="1" aria-label="Next look">▶</button>
+          <div class="title-actions">
+            <button class="start">${returning ? 'Continue' : 'Start exploring'}</button>
+            <button class="secondary create">Character creator</button>
           </div>
-          <button class="start">${returning ? 'Continue' : 'Start exploring'}</button>
-          <div class="hint">WASD / Arrows to walk · SHIFT run · SPACE jump · E interact · Drag to look · Scroll to zoom</div>
+          <div class="hint">WASD / Arrows to walk · SHIFT run · SPACE jump/swim up · C dive · E interact · F pick up/throw · Drag to look</div>
           ${returning ? '<button class="linkish reset">Start over (erase save)</button>' : ''}
         </div>`);
       this.root.appendChild(el);
-      let busy = false;
-      const who = el.querySelector('.who b');
-      let skin = CHARACTER_SKINS[idx];
-      el.querySelectorAll('.arrow').forEach((b) => b.addEventListener('click', async () => {
-        if (busy) return;
-        busy = true;
-        idx = (idx + Number(b.dataset.d) + CHARACTER_SKINS.length) % CHARACTER_SKINS.length;
-        who.textContent = `${idx + 1} / ${CHARACTER_SKINS.length}`;
-        skin = CHARACTER_SKINS[idx];
-        await this.onPreviewSkin(skin);
-        busy = false;
-      }));
       const reset = el.querySelector('.reset');
       if (reset) reset.addEventListener('click', () => { save.reset(); location.reload(); });
       let alive = true;
       const loop = () => { if (!alive) return; renderStill(); requestAnimationFrame(loop); };
       loop();
-      el.querySelector('.start').addEventListener('click', async () => {
+      el.querySelector('.create').addEventListener('click', async () => {
+        el.classList.add('hidden');
+        await this.openCreator();
+        el.classList.remove('hidden');
+      });
+      el.querySelector('.start').addEventListener('click', () => {
         alive = false;
-        await onSkin(skin);
         el.classList.add('fade');
         setTimeout(() => el.remove(), 600);
         resolve();
@@ -85,36 +75,200 @@ export class UI {
     });
   }
 
+  // ------------------------------------------------------------------ character creator
+  openCreator() {
+    const g = this.game;
+    if (this.creator) return Promise.resolve();
+    return new Promise((resolve) => {
+      const look = { ...defaultLook(), ...(g.save.data.look || { base: g.save.data.skin || CHARACTER_SKINS[0] }) };
+      const before = JSON.stringify(look);
+      this.modal = true;
+      this.creatorState = { yaw: 0, zoom: 0, tab: 'body' };
+      const swatches = (key, list) => `<div class="swatches" data-k="${key}">${list.map((c) => `<button class="sw" data-v="${c}" style="--c:${c}" aria-label="${key} ${c}"></button>`).join('')}</div>`;
+      const chips = (key, list) => `<div class="chips" data-k="${key}">${list.map((v) => `<button class="chip" data-v="${v}">${LABELS[v]}</button>`).join('')}</div>`;
+      const slider = (key, label, min, max) => `<label class="slider"><span>${label}</span><input type="range" id="cc-${key}" data-k="${key}" min="${min}" max="${max}" step="0.01"><b></b></label>`;
+      const el = $(`
+        <div class="creator">
+          <div class="cc-head">
+            <div class="cc-title">CHARACTER</div>
+            <input class="cc-name" id="cc-name" maxlength="16" placeholder="Your name" aria-label="Your name">
+          </div>
+          <div class="cc-tabs">
+            <button data-t="body" class="on">Body</button><button data-t="hair">Hair & face</button><button data-t="clothes">Clothes</button><button data-t="extras">Extras</button>
+          </div>
+          <div class="cc-body">
+            <section data-t="body">
+              <h4>Base style</h4>
+              <div class="stepper"><button class="arrow small" data-d="-1" aria-label="Previous style">◀</button><b class="base-n"></b><button class="arrow small" data-d="1" aria-label="Next style">▶</button></div>
+              <h4>Skin tone</h4>${swatches('skin', PALETTES.skin)}
+              <h4>Proportions</h4>
+              ${slider('height', 'Height', 0.85, 1.15)}${slider('headSize', 'Head size', 0.85, 1.35)}${slider('build', 'Build', 0.85, 1.25)}
+            </section>
+            <section data-t="hair" hidden>
+              <h4>Hair colour</h4>${swatches('hair', PALETTES.hair)}
+              <h4>Hat</h4>${chips('hat', HATS)}
+              <h4>Face</h4>${chips('face', FACES)}
+            </section>
+            <section data-t="clothes" hidden>
+              <label class="toggle"><input type="checkbox" id="cc-recolor"> <span>Use my own colours (off = the style's original outfit)</span></label>
+              <h4>Top</h4>${swatches('shirt', PALETTES.cloth)}
+              <h4>Bottoms</h4>${swatches('pants', PALETTES.cloth)}
+              <h4>Shoes</h4>${swatches('shoes', PALETTES.cloth)}
+            </section>
+            <section data-t="extras" hidden>
+              <h4>On your back</h4>${chips('back', BACKS)}
+              <h4>Accessory colour</h4>${swatches('accent', PALETTES.cloth)}
+              <p class="cc-note">Capes and scarves are simulated cloth: they flutter when you run and float when you swim.</p>
+            </section>
+          </div>
+          <div class="cc-foot">
+            <button class="secondary rnd">Randomize</button>
+            <button class="secondary undo">Reset</button>
+            <button class="start done">Done</button>
+          </div>
+        </div>`);
+      const hint = $('<div class="cc-hint">Drag the background to turn around</div>');
+      this.root.appendChild(hint);
+      this.root.appendChild(el);
+      this.creator = el;
+      const refresh = () => {
+        el.querySelector('.base-n').textContent = `${CHARACTER_SKINS.indexOf(look.base) + 1} / ${CHARACTER_SKINS.length}`;
+        el.querySelectorAll('.swatches').forEach((w) => w.querySelectorAll('.sw').forEach((b) => b.classList.toggle('on', look[w.dataset.k] === b.dataset.v)));
+        el.querySelectorAll('.chips').forEach((w) => w.querySelectorAll('.chip').forEach((b) => b.classList.toggle('on', look[w.dataset.k] === b.dataset.v)));
+        el.querySelectorAll('input[type=range]').forEach((r) => { r.value = look[r.dataset.k]; r.nextElementSibling.textContent = Math.round(look[r.dataset.k] * 100) + '%'; });
+        el.querySelector('#cc-recolor').checked = !!look.recolor;
+        el.querySelector('#cc-name').value = look.name || '';
+      };
+      let pending = null, building = false;
+      const rebuild = async () => {
+        if (building) { pending = true; return; }
+        building = true;
+        await g.setLook({ ...look });
+        building = false;
+        if (pending) { pending = false; rebuild(); }
+      };
+      const recolorOnly = () => {
+        const a = g.player.anim;
+        if (a.recolor && look.recolor && a.look.base === look.base) { Object.assign(a.look, look); a.recolor.paint(look); return true; }
+        return false;
+      };
+      el.querySelectorAll('.cc-tabs button').forEach((b) => b.addEventListener('click', () => {
+        el.querySelectorAll('.cc-tabs button').forEach((x) => x.classList.toggle('on', x === b));
+        el.querySelectorAll('.cc-body section').forEach((sct) => { sct.hidden = sct.dataset.t !== b.dataset.t; });
+        this.creatorState.tab = b.dataset.t;
+      }));
+      el.querySelectorAll('.stepper .arrow').forEach((b) => b.addEventListener('click', () => {
+        const i = CHARACTER_SKINS.indexOf(look.base);
+        look.base = CHARACTER_SKINS[(i + Number(b.dataset.d) + CHARACTER_SKINS.length) % CHARACTER_SKINS.length];
+        refresh(); rebuild();
+      }));
+      el.querySelectorAll('.swatches').forEach((w) => w.addEventListener('click', (e) => {
+        const b = e.target.closest('.sw'); if (!b) return;
+        look[w.dataset.k] = b.dataset.v;
+        const structural = w.dataset.k === 'accent';
+        if (!look.recolor && w.dataset.k !== 'accent') look.recolor = true;
+        refresh();
+        if (structural || !recolorOnly()) rebuild();
+      }));
+      el.querySelectorAll('.chips').forEach((w) => w.addEventListener('click', (e) => {
+        const b = e.target.closest('.chip'); if (!b) return;
+        look[w.dataset.k] = b.dataset.v; refresh(); rebuild();
+      }));
+      el.querySelectorAll('input[type=range]').forEach((r) => {
+        r.addEventListener('input', () => {
+          look[r.dataset.k] = parseFloat(r.value);
+          r.nextElementSibling.textContent = Math.round(look[r.dataset.k] * 100) + '%';
+          const a = g.player.anim;
+          if (r.dataset.k === 'headSize') a.proportions.head = look.headSize;
+          if (r.dataset.k === 'build') a.proportions.build = look.build;
+        });
+        r.addEventListener('change', () => { if (r.dataset.k === 'height' || r.dataset.k === 'build') rebuild(); });
+      });
+      el.querySelector('#cc-recolor').addEventListener('change', (e) => { look.recolor = e.target.checked; rebuild(); });
+      el.querySelector('#cc-name').addEventListener('input', (e) => { look.name = e.target.value.slice(0, 16); });
+      el.querySelector('#cc-name').addEventListener('keydown', (e) => e.stopPropagation());
+      el.querySelector('.rnd').addEventListener('click', () => { Object.assign(look, randomLook(), { name: look.name }); refresh(); rebuild(); });
+      el.querySelector('.undo').addEventListener('click', () => { Object.assign(look, JSON.parse(before)); refresh(); rebuild(); });
+      el.querySelector('.done').addEventListener('click', async () => {
+        await g.setLook({ ...look }, true);
+        el.classList.add('out');
+        hint.remove();
+        setTimeout(() => el.remove(), 250);
+        this.creator = null;
+        this.creatorState = null;
+        this.modal = false;
+        g.audio.discover();
+        resolve();
+      });
+      refresh();
+    });
+  }
+
+  toggleSettings() {
+    const g = this.game;
+    if (this.settingsEl) { this.settingsEl.remove(); this.settingsEl = null; this.modal = false; return; }
+    if (this.modal) return;
+    this.modal = true;
+    const el = $(`
+      <div class="journal settings">
+        <div class="jhead">SETTINGS <button class="close" aria-label="Close">✕</button></div>
+        <h4>Graphics quality</h4>
+        <div class="chips" data-k="quality">${['low', 'medium', 'high'].map((v) => `<button class="chip ${settings.quality === v ? 'on' : ''}" data-v="${v}">${v[0].toUpperCase() + v.slice(1)}</button>`).join('')}</div>
+        <p class="cc-note">High adds sharper shadows, anti-aliasing and more lights. Medium and High use ambient occlusion and bloom.</p>
+        <label class="toggle"><input type="checkbox" id="st-auto" ${settings.autoQuality ? 'checked' : ''}> <span>Lower quality automatically if the game runs slowly</span></label>
+        <h4>Art style</h4>
+        <div class="chips" data-k="style">${[['realistic', 'Realistic'], ['storybook', 'Storybook']].map(([v, l]) => `<button class="chip ${settings.style === v ? 'on' : ''}" data-v="${v}">${l}</button>`).join('')}</div>
+        <p class="cc-note">Changing the art style reloads the game. Your progress is kept.</p>
+        <label class="toggle"><input type="checkbox" id="st-ink" ${settings.outlines ? 'checked' : ''}> <span>Ink outlines</span></label>
+        <label class="toggle"><input type="checkbox" id="st-music" ${settings.music ? 'checked' : ''}> <span>Music</span></label>
+        <label class="toggle"><input type="checkbox" id="st-lamp" ${g.lights.carryOn ? 'checked' : ''}> <span>Carry a lantern at night (L)</span></label>
+      </div>`);
+    el.querySelector('.close').addEventListener('click', () => this.toggleSettings());
+    el.querySelectorAll('.chips[data-k=quality] .chip').forEach((b) => b.addEventListener('click', () => {
+      el.querySelectorAll('.chips[data-k=quality] .chip').forEach((x) => x.classList.toggle('on', x === b));
+      g.applyQuality(b.dataset.v);
+    }));
+    el.querySelectorAll('.chips[data-k=style] .chip').forEach((b) => b.addEventListener('click', () => {
+      if (settings.style === b.dataset.v) return;
+      settings.style = b.dataset.v;
+      settings.outlines = b.dataset.v === 'storybook';
+      saveSettings();
+      g.save.write();
+      location.reload();
+    }));
+    el.querySelector('#st-auto').addEventListener('change', (e) => { settings.autoQuality = e.target.checked; saveSettings(); });
+    el.querySelector('#st-ink').addEventListener('change', (e) => { settings.outlines = e.target.checked; saveSettings(); });
+    el.querySelector('#st-music').addEventListener('change', (e) => { settings.music = e.target.checked; g.audio.musicOn = settings.music; saveSettings(); });
+    el.querySelector('#st-lamp').addEventListener('change', (e) => { g.lights.carryOn = e.target.checked; });
+    this.root.appendChild(el);
+    this.settingsEl = el;
+  }
+
   bind(game) {
     this.game = game;
-    const { save, audio, input } = game;
-    this.onPreviewSkin = async (skin) => {
-      const p = game.player;
-      const a = await makeCharacter(skin);
-      game.scene.remove(p.anim.root);
-      a.root.add(p.parasol);
-      p.anim = a; p.obj = a.root;
-      game.scene.add(a.root);
-      p.sync();
-      a.play('emote-yes', 0.1);
-      save.data.skin = skin;
-    };
+    const { save, audio } = game;
     this.hudEl = $(`
       <div class="hud hidden">
         <div class="hud-left"><div class="here"></div></div>
         <div class="hud-right">
           <div class="stars" title="Stardrops"><span class="star-ico">★</span><span class="count">0</span></div>
-          <button class="hb journal-btn" title="Journal (J)">📖</button>
-          <button class="hb photo-btn" title="Photo mode (P)">📷</button>
-          <button class="hb mute-btn" title="Sound (M)">${save.data.muted ? '🔇' : '🔊'}</button>
-          <button class="hb help-btn" title="Controls (H)">?</button>
+          <button class="hb journal-btn" title="Journal (J)" aria-label="Journal">📖</button>
+          <button class="hb wardrobe-btn" title="Character (K)" aria-label="Character creator">👕</button>
+          <button class="hb photo-btn" title="Photo mode (P)" aria-label="Photo mode">📷</button>
+          <button class="hb mute-btn" title="Sound (M)" aria-label="Sound">${save.data.muted ? '🔇' : '🔊'}</button>
+          <button class="hb settings-btn" title="Settings" aria-label="Settings">⚙</button>
+          <button class="hb help-btn" title="Controls (H)" aria-label="Help">?</button>
         </div>
         <div class="clock"></div>
+        <div class="breath hidden"><span>AIR</span><div class="bar"><i></i></div></div>
+        <div class="carry hidden"></div>
       </div>`);
     this.root.appendChild(this.hudEl);
     this.hudEl.querySelector('.journal-btn').addEventListener('click', () => this.toggleJournal());
+    this.hudEl.querySelector('.wardrobe-btn').addEventListener('click', () => { if (!this.modal) this.openCreator(); });
     this.hudEl.querySelector('.photo-btn').addEventListener('click', () => this.togglePhoto());
     this.hudEl.querySelector('.help-btn').addEventListener('click', () => this.toggleHelp());
+    this.hudEl.querySelector('.settings-btn').addEventListener('click', () => this.toggleSettings());
     const mb = this.hudEl.querySelector('.mute-btn');
     mb.addEventListener('click', () => {
       save.data.muted = !save.data.muted; save.write();
@@ -232,7 +386,11 @@ export class UI {
         <table>
           <tr><td><b>WASD</b> / Arrows</td><td>Walk</td></tr>
           <tr><td><b>Shift</b></td><td>Run (scares animals!)</td></tr>
-          <tr><td><b>Space</b></td><td>Jump · hold in the air to glide (once you have a parasol)</td></tr>
+          <tr><td><b>Space</b></td><td>Jump · hold in the air to glide (once you have a parasol) · swim up</td></tr>
+          <tr><td><b>C</b> / Ctrl</td><td>Dive under water (watch your air!)</td></tr>
+          <tr><td><b>F</b></td><td>Pick up / throw balls, crates, fruit and snowballs</td></tr>
+          <tr><td><b>K</b></td><td>Character creator</td></tr>
+          <tr><td><b>L</b></td><td>Toggle your night lantern</td></tr>
           <tr><td><b>E</b> / Click</td><td>Talk, pet, sit, ride, read</td></tr>
           <tr><td><b>Drag</b> · <b>Scroll</b></td><td>Look around · Zoom</td></tr>
           <tr><td><b>J</b> / Tab</td><td>Journal</td></tr>
@@ -257,9 +415,11 @@ export class UI {
         <div class="joy"><div class="knob"></div></div>
         <button class="tb jump">⤒</button>
         <button class="tb act">E</button>
+        <button class="tb dive" aria-label="Dive">⤓</button>
+        <button class="tb grab" aria-label="Pick up or throw">✋</button>
       </div>`);
     this.root.appendChild(el);
-    input.bindTouch(el.querySelector('.joy'), el.querySelector('.knob'), [[el.querySelector('.jump'), 'Space'], [el.querySelector('.act'), 'KeyE']]);
+    input.bindTouch(el.querySelector('.joy'), el.querySelector('.knob'), [[el.querySelector('.jump'), 'Space'], [el.querySelector('.act'), 'KeyE'], [el.querySelector('.dive'), 'KeyDive'], [el.querySelector('.grab'), 'KeyF']]);
     document.body.classList.add('is-touch');
   }
 
@@ -271,7 +431,18 @@ export class UI {
     if (input.hit('KeyH')) this.toggleHelp();
     if (input.hit('KeyP')) this.togglePhoto();
     if (input.hit('KeyM')) this.hudEl.querySelector('.mute-btn').click();
-    if (input.hit('Escape')) { this.toggleJournal(false); if (this.help) this.toggleHelp(); if (this.photo) this.togglePhoto(); }
+    if (input.hit('KeyK') && !this.modal) this.openCreator();
+    if (input.hit('KeyL')) { game.lights.carryOn = !game.lights.carryOn; this.toast(game.lights.carryOn ? 'Lantern on' : 'Lantern off'); }
+    // breath meter
+    const br = this.hudEl.querySelector('.breath');
+    const showBreath = player.mode === 'dive' || player.breath < 0.999;
+    br.classList.toggle('hidden', !showBreath);
+    if (showBreath) { const i = br.querySelector('i'); i.style.width = Math.round(player.breath * 100) + '%'; br.classList.toggle('low', player.breath < 0.25); }
+    const carry = this.hudEl.querySelector('.carry');
+    carry.classList.toggle('hidden', !player.holding);
+    if (player.holding) { const t = `Carrying ${player.holding.name}: F or E to throw`; if (carry.textContent !== t) carry.textContent = t; }
+    if (input.hit('Escape')) { this.toggleJournal(false); if (this.help) this.toggleHelp(); if (this.photo) this.togglePhoto(); if (this.settingsEl) this.toggleSettings(); }
+    if (this.creator) return;
 
     // dialogue typing
     if (this.dlg) {
@@ -303,6 +474,7 @@ export class UI {
     if (player.mode !== 'sit' && !this.modal) {
       for (const it of interactables) {
         if (it.enabled === false) continue;
+        if (it.body && player.holding) continue;
         const d = it.pos.distanceTo(pp);
         if (d < it.radius && d < bestD) { best = it; bestD = d; }
       }

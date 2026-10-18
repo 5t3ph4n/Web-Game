@@ -1,12 +1,15 @@
 import * as THREE from 'three';
-import { R, sample } from './planet.js';
+import { R, sample, normalAt } from './planet.js';
 import { resolve } from './collision.js';
-import { toonMaterial } from './toon.js';
+import { toonMaterial, globalUniforms } from './toon.js';
+import { waveHeight } from './water.js';
+import { Cloth } from './character.js';
 
 const _m = new THREE.Matrix4();
 const _right = new THREE.Vector3();
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
+const _n = new THREE.Vector3();
 
 /** Orient an object so +Y = up and +Z = forward. */
 export function orient(obj, up, forward) {
@@ -27,12 +30,18 @@ export function tangent(v, up) {
   return v.normalize();
 }
 
-export const WATER_DEPTH_SWIM = -0.95;
+/** Water surface radius at a world point (waves calm down in the shallows). */
+export function waterSurfaceR(p, t, groundH) {
+  const calm = THREE.MathUtils.clamp(-groundH / 2.5, 0, 1) * 0.85 + 0.15;
+  return R + waveHeight(p, t) * calm;
+}
+
+export const WATER_DEPTH_SWIM = -1.25; // water this deep (or more) means swimming
+const CHEST = 1.2; // feet-to-chest: how deep the feet hang when treading water
+const BREATH_TIME = 14; // seconds of air
 
 export class Player {
   constructor(anim, colliders, audio) {
-    this.anim = anim;
-    this.obj = anim.root;
     this.colliders = colliders;
     this.audio = audio;
     this.up = new THREE.Vector3(0, 1, 0);
@@ -41,30 +50,53 @@ export class Player {
     this.vel = new THREE.Vector3(); // tangential velocity
     this.vUp = 0;
     this.onGround = true;
-    this.mode = 'walk'; // walk | swim | glide | sit | ride
+    this.mode = 'walk'; // walk | swim | dive | glide | sit | ride
     this.hasGlider = false;
     this.speed = 0;
     this.stepT = 0;
     this.coyote = 0;
-    this.lastGroundH = 0;
     this.airTime = 0;
-    this.bounce = 0;
     this.radius = 0.45;
     this.frozen = false;
     this.touching = null;
+    this.breath = 1;
+    this.swimT = 0;
+    this.swimLean = 0;
+    this.landSquash = 0;
+    this.fallStart = 0;
+    this.events = []; // gameplay events for fx/ui: splash, land, outOfBreath...
 
     // little parasol glider
     const g = new THREE.Group();
-    const canopy = new THREE.Mesh(new THREE.ConeGeometry(1.3, 0.55, 10, 1, true), toonMaterial({ color: 0xf3a6a0, side: THREE.DoubleSide }));
+    const canopy = new THREE.Mesh(new THREE.ConeGeometry(1.3, 0.55, 12, 1, true), toonMaterial({ color: 0xf3a6a0, side: THREE.DoubleSide }));
     canopy.position.y = 2.95;
     const stick = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 1.4), toonMaterial({ color: 0x6b4a3a }));
     stick.position.y = 2.2;
     const knob = new THREE.Mesh(new THREE.SphereGeometry(0.08), toonMaterial({ color: 0xffe08a }));
     knob.position.y = 3.25;
     g.add(canopy, stick, knob);
+    g.traverse((o) => { if (o.isMesh) o.castShadow = true; });
     g.visible = false;
     this.parasol = g;
-    this.obj.add(g);
+    this.setAnim(anim);
+  }
+
+  /** Swap the character model (character creator). */
+  setAnim(anim, scene) {
+    if (this.anim && scene) scene.remove(this.anim.root);
+    this.anim = anim;
+    this.obj = anim.root;
+    this.obj.add(this.parasol);
+    if (scene) scene.add(this.obj);
+    if (this.cloth) { this.cloth.dispose(); this.cloth = null; }
+    const look = anim.look;
+    if (look && (look.back === 'cape' || look.back === 'scarf') && scene) {
+      this.cloth = new Cloth(scene, look.accent, look.back === 'cape'
+        ? { w: 6, h: 9, width: 0.62 * look.build, length: 1.0 * look.height }
+        : { w: 3, h: 7, width: 0.16, length: 0.7 });
+      this.clothKind = look.back;
+    }
+    this.sync();
   }
 
   place(dir, facing) {
@@ -74,16 +106,21 @@ export class Player {
     if (facing) this.facing.copy(facing);
     tangent(this.facing, this.up);
     this.vel.set(0, 0, 0); this.vUp = 0;
+    this.mode = 'walk';
+    if (this.cloth) this.cloth.ready = false;
     this.sync();
   }
 
   get feetR() { return this.pos.length(); }
+  get inWater() { return this.mode === 'swim' || this.mode === 'dive'; }
 
   update(dt, input, cam) {
     if (this.mode === 'sit' || this.mode === 'ride' || this.frozen) {
       this.anim.update(dt);
+      this.updateCloth(dt);
       return;
     }
+    const t = globalUniforms.uTime.value;
     const up = this.up.copy(this.pos).normalize();
     tangent(this.facing, up);
 
@@ -95,43 +132,57 @@ export class Player {
     const want = new THREE.Vector3().addScaledVector(camF, ax.y).addScaledVector(camR, ax.x);
     const mag = Math.min(1, want.length());
     const running = input.down('ShiftLeft', 'ShiftRight') || input.touchRun;
-    const swimming = this.mode === 'swim';
+    const water = this.inWater;
+    const diving = this.mode === 'dive';
     let maxSpeed = running ? 10.5 : 5.2;
-    if (swimming) maxSpeed = running ? 5.5 : 3.4;
+    if (this.mode === 'swim') maxSpeed = running ? 5.2 : 3.2;
+    if (diving) maxSpeed = running ? 5.8 : 3.8;
     if (this.mode === 'glide') maxSpeed = 11;
 
     const sp0 = this.vel.length();
     if (sp0 > 1e-5) tangent(this.vel, up).multiplyScalar(sp0); else this.vel.set(0, 0, 0);
 
-    const accel = this.onGround || swimming ? 40 : 14;
+    const accel = water ? 9 : this.onGround ? 40 : 10;
     if (mag > 0.05) {
       want.normalize().multiplyScalar(maxSpeed * mag);
       this.vel.lerp(want, Math.min(1, (accel * dt) / Math.max(maxSpeed, 1)));
-      // turn to face movement
       const tgt = _v.copy(want).normalize();
-      this.facing.lerp(tgt, Math.min(1, dt * 12));
+      this.facing.lerp(tgt, Math.min(1, dt * (water ? 4 : 12)));
       tangent(this.facing, up);
     } else {
-      this.vel.multiplyScalar(Math.max(0, 1 - dt * (this.onGround ? 14 : 2)));
+      // friction on land, drag in water, little air control
+      this.vel.multiplyScalar(Math.max(0, 1 - dt * (water ? 1.6 : this.onGround ? 14 : 0.6)));
+    }
+
+    // ground info under us
+    const curH = sample(up);
+
+    // sliding down very steep slopes
+    if (this.onGround && !water) {
+      normalAt(up, _n);
+      const steep = _n.dot(up);
+      if (steep < 0.62) {
+        const down = _v.copy(_n).addScaledVector(up, -_n.dot(up));
+        this.vel.addScaledVector(down, (0.62 - steep) * 60 * dt);
+        this.sliding = true;
+      } else this.sliding = false;
     }
     this.speed = this.vel.length();
 
-    // jumping / gliding
+    // jumping / gliding / swimming up
     if (this.onGround) this.coyote = 0.12; else this.coyote -= dt;
-    if (input.hit('Space') && (this.coyote > 0 || swimming)) {
-      this.vUp = swimming ? 6.5 : 8.6;
+    if (input.hit('Space') && this.coyote > 0 && !water) {
+      this.vUp = 8.6;
       this.onGround = false;
       this.coyote = 0;
-      this.mode = 'walk';
       this.anim.play('jump', 0.08, { once: true, timeScale: 1.4 });
       this.audio && this.audio.jump();
     }
-    const gliding = !this.onGround && this.hasGlider && input.down('Space') && this.vUp < 0 && this.airTime > 0.25;
-    this.mode = gliding ? 'glide' : this.mode === 'glide' ? 'walk' : this.mode;
+    const gliding = !water && !this.onGround && this.hasGlider && input.down('Space') && this.vUp < 0 && this.airTime > 0.25;
+    if (gliding) this.mode = 'glide'; else if (this.mode === 'glide') this.mode = 'walk';
     this.parasol.visible = gliding;
 
     // integrate tangential motion (move along the sphere)
-    const curH = sample(up);
     const step = _v.copy(this.vel).multiplyScalar(dt);
     if (step.lengthSq() > 0) {
       const newPos = _v2.copy(this.pos).add(step);
@@ -139,21 +190,13 @@ export class Player {
       const nh = sample(nd);
       const rise = nh - Math.max(curH, this.feetR - R);
       const slope = rise / Math.max(step.length(), 1e-4);
-      if (this.onGround && rise > 0.18 && slope > 2.0) {
-        // too steep: slide along by cancelling the climbing part
-        this.vel.multiplyScalar(0.2);
+      if ((this.onGround || water) && rise > 0.18 && slope > 2.0) {
+        this.vel.multiplyScalar(0.2); // wall of rock
       } else {
         const r = this.pos.length();
         this.pos.copy(nd).multiplyScalar(r);
       }
     }
-
-    // vertical
-    const g = gliding ? 7 : 24;
-    this.vUp -= g * dt;
-    if (gliding && this.vUp < -2.2) this.vUp = -2.2;
-    let r = this.pos.length() + this.vUp * dt;
-    this.pos.setLength(r);
 
     // collisions with props (can stand on finite-height props)
     this.touching = null;
@@ -168,27 +211,75 @@ export class Player {
     let groundR = R + gh;
     if (floorR > groundR) groundR = floorR;
 
-    // water
-    const seaFloat = R + WATER_DEPTH_SWIM;
-    const deep = gh < WATER_DEPTH_SWIM && floorR < seaFloat;
-    r = this.pos.length();
+    // ------------------------------------------------------------ water
+    const surfR = waterSurfaceR(this.pos, t, gh);
+    const deep = gh < WATER_DEPTH_SWIM && floorR < surfR - 1;
+    let r = this.pos.length();
     const wasGround = this.onGround;
-    if (deep && r <= seaFloat + 0.05) {
-      if (this.mode !== 'swim' && this.vUp < -6) this.audio && this.audio.splash();
-      this.mode = 'swim';
-      // buoyancy
-      this.vUp += (seaFloat - r) * 30 * dt;
-      this.vUp *= 1 - Math.min(1, dt * 4);
-      if (r < seaFloat - 0.4) this.pos.setLength(seaFloat - 0.4);
+    const wasWater = water;
+
+    if (deep && (water || r < surfR - CHEST + 0.25)) {
+      // entering the water
+      if (!wasWater) {
+        if (this.vUp < -4 || this.mode === 'glide') this.events.push({ type: 'splash', big: this.vUp < -10 });
+        else this.events.push({ type: 'splash', big: false });
+        this.mode = 'swim';
+        this.vUp *= 0.35;
+      }
+      const wantDive = input.down('KeyC', 'ControlLeft', 'ControlRight', 'KeyDive');
+      const wantUp = input.down('Space');
+      const restR = surfR - CHEST; // treading-water feet height
+      if (this.mode === 'swim' && wantDive && this.breath > 0.1) {
+        this.mode = 'dive';
+        this.vUp = -3;
+        this.audio && this.audio.splash();
+      }
+      if (this.mode === 'dive') {
+        // underwater: free vertical control, gentle buoyancy, drag
+        let vt = 0;
+        if (wantDive) vt -= 3.4;
+        if (wantUp || this.breath <= 0) vt += 3.6;
+        if (!wantDive && !wantUp) vt += 0.6; // you slowly float up
+        this.vUp += (vt - this.vUp) * Math.min(1, dt * 3);
+        r += this.vUp * dt;
+        const floorLimit = groundR + 0.3;
+        if (r < floorLimit) { r = floorLimit; if (this.vUp < 0) this.vUp = 0; }
+        if (r >= restR) { r = restR; this.mode = 'swim'; this.vUp = 0; this.events.push({ type: 'surface' }); }
+        this.breath = Math.max(0, this.breath - dt / BREATH_TIME);
+        if (this.breath === 0 && !this.outOfBreath) { this.outOfBreath = true; this.events.push({ type: 'outOfBreath' }); }
+        if (Math.random() < dt * 3) this.events.push({ type: 'bubble' });
+      } else {
+        // surface swimming: spring to the wave surface (bobbing with it)
+        this.vUp += (restR - r) * 26 * dt;
+        this.vUp *= 1 - Math.min(1, dt * 5);
+        r += this.vUp * dt;
+        this.breath = Math.min(1, this.breath + dt / 3);
+        if (this.breath > 0.3) this.outOfBreath = false;
+        // climbing out: jump when there is shallow ground ahead
+        if (wantUp && input.hit('Space')) {
+          const ahead = this.pos.clone().addScaledVector(this.facing, 1.6).normalize();
+          if (sample(ahead) > -1.0) { this.vUp = 7.5; r += 0.3; this.mode = 'walk'; this.onGround = false; this.anim.play('jump', 0.1, { once: true }); }
+          else { this.vUp = 2.5; this.events.push({ type: 'splash', big: false }); }
+        }
+      }
+      this.pos.setLength(r);
       this.onGround = false;
       this.coyote = 0;
     } else {
-      if (this.mode === 'swim') this.mode = 'walk';
+      if (wasWater) { this.mode = 'walk'; this.breath = 1; }
+      // gravity
+      const g = gliding ? 7 : 24;
+      this.vUp -= g * dt;
+      if (gliding && this.vUp < -2.2) this.vUp = -2.2;
+      r += this.vUp * dt;
+      this.pos.setLength(r);
       if (r <= groundR + 0.02) {
         this.pos.setLength(groundR);
-        if (!wasGround && this.vUp < -3) {
-          this.audio && this.audio.land();
-          if (this.bounce > 0) { this.vUp = this.bounce; this.bounce = 0; }
+        if (!wasGround) {
+          const impact = -this.vUp;
+          if (impact > 3) this.audio && this.audio.land();
+          if (impact > 15) { this.landSquash = Math.min(1, (impact - 15) / 12 + 0.4); this.events.push({ type: 'hardLand', impact }); this.vel.multiplyScalar(0.4); }
+          else if (impact > 7) this.landSquash = 0.25;
         }
         if (this.vUp <= 0) {
           this.vUp = 0; this.onGround = true;
@@ -197,42 +288,115 @@ export class Player {
       } else if (r > groundR + 0.25) {
         this.onGround = false;
       } else if (this.onGround && this.vUp <= 0) {
-        // stick to slopes going downhill
-        this.pos.setLength(groundR);
+        this.pos.setLength(groundR); // stick to slopes going downhill
       }
     }
-    this.airTime = this.onGround ? 0 : this.airTime + dt;
+    this.airTime = this.onGround || this.inWater ? 0 : this.airTime + dt;
+    this.depth = Math.max(0, surfR - (this.pos.length() + 1.5)); // head depth below surface
 
     this.sync();
     this.animate(dt, running);
+    this.updateCloth(dt);
   }
 
   animate(dt, running) {
     const a = this.anim;
+    const b = a.bones;
+    this.landSquash = Math.max(0, this.landSquash - dt * 2.5);
     if (this.petT > 0) { this.petT -= dt; a.update(dt); return; }
-    if (this.mode === 'swim') {
-      a.play(this.speed > 0.5 ? 'sprint' : 'idle', 0.25);
-      a.setSpeed(this.speed > 0.5 ? 0.55 : 0.6);
-      this.anim.model.position.y = -0.95;
-    } else {
-      this.anim.model.position.y += (0 - this.anim.model.position.y) * Math.min(1, dt * 10);
-      if (this.mode === 'glide') a.play('holding-both', 0.2);
-      else if (!this.onGround && this.airTime > 0.12) {
-        if (this.vUp < -1 && a.currentName !== 'fall') a.play('fall', 0.25);
-      } else if (this.speed > 7) { a.play('sprint', 0.15); a.setSpeed(this.speed / 9); }
-      else if (this.speed > 0.4) { a.play('walk', 0.15); a.setSpeed(Math.max(0.6, this.speed / 4.2)); }
-      else a.play('idle', 0.25);
+    const water = this.inWater;
+    // body lean: horizontal while swimming forward or diving
+    const moving = this.speed > 0.6;
+    const targetLean = this.mode === 'dive' ? (moving ? 1.35 : 0.9) + THREE.MathUtils.clamp(-this.vUp * 0.15, -0.5, 0.5)
+      : this.mode === 'swim' ? (moving ? 1.2 : 0.15) : this.mode === 'glide' ? 0 : 0;
+    this.swimLean += (targetLean - this.swimLean) * Math.min(1, dt * 4);
+    a.pose.rotation.x = this.swimLean;
+    // when horizontal at the surface, lift the hips so the back is at the waterline
+    a.pose.position.y = a.hip + (this.mode === 'swim' ? 0.25 + Math.sin(Math.min(this.swimLean, 1.3)) * 0.55 : 0);
+    // landing squash
+    const sq = this.landSquash;
+    a.pose.scale.set(1 + sq * 0.12, 1 - sq * 0.22, 1 + sq * 0.12);
+
+    if (water) {
+      a.play('idle', 0.3);
+    } else if (this.mode === 'glide') a.play('holding-both', 0.2);
+    else if (!this.onGround && this.airTime > 0.12) {
+      if (this.vUp < -1 && a.currentName !== 'fall') a.play('fall', 0.25);
+    } else if (this.speed > 7) { a.play('sprint', 0.15); a.setSpeed(this.speed / 9); }
+    else if (this.speed > 0.4) { a.play('walk', 0.15); a.setSpeed(Math.max(0.6, this.speed / 4.2)); }
+    else if (this.holding) a.play('holding-both', 0.2);
+    else a.play('idle', 0.25);
+    a.update(dt);
+
+    // procedural swim strokes on top of the idle animation
+    if (water && b['arm-left'] && b['arm-right']) {
+      const rate = moving ? 1.6 + this.speed * 0.35 : 0.9;
+      this.swimT += dt * rate * Math.PI;
+      const st = this.swimT;
+      if (moving) {
+        // front crawl: arms windmill, legs flutter
+        b['arm-left'].rotation.x = -st;
+        b['arm-right'].rotation.x = -st - Math.PI;
+        b['arm-left'].rotation.z = 0.15; b['arm-right'].rotation.z = -0.15;
+        if (b['leg-left']) b['leg-left'].rotation.x = Math.sin(st * 2.2) * 0.45;
+        if (b['leg-right']) b['leg-right'].rotation.x = -Math.sin(st * 2.2) * 0.45;
+        if (b.head && this.mode === 'swim') b.head.rotation.x = -0.9 + Math.max(0, Math.sin(st)) * 0.3;
+      } else {
+        // treading water: sculling arms, slow kicks
+        b['arm-left'].rotation.z = 1.1 + Math.sin(st) * 0.35;
+        b['arm-right'].rotation.z = -1.1 - Math.sin(st) * 0.35;
+        b['arm-left'].rotation.x = Math.cos(st) * 0.3;
+        b['arm-right'].rotation.x = Math.cos(st) * 0.3;
+        if (b['leg-left']) b['leg-left'].rotation.x = Math.sin(st * 1.3) * 0.35;
+        if (b['leg-right']) b['leg-right'].rotation.x = -Math.sin(st * 1.3) * 0.35;
+      }
     }
-    // footsteps
+    // fairy wings flap
+    if (a.wings) {
+      const f = Math.sin(performance.now() / 1000 * (this.onGround ? 3 : 14)) * (this.onGround ? 0.15 : 0.5);
+      a.wings.children.forEach((w) => { w.rotation.y = w.userData.side * (0.5 + f); });
+    }
+
+    // footsteps & strokes
     if (this.onGround && this.speed > 0.6) {
       this.stepT -= dt * this.speed * (running ? 0.52 : 0.62);
-      if (this.stepT <= 0) { this.stepT = 1; this.audio && this.audio.step(this.pos); }
+      if (this.stepT <= 0) { this.stepT = 1; this.audio && this.audio.step(this.pos); this.events.push({ type: 'step' }); }
     }
-    if (this.mode === 'swim' && this.speed > 0.6) {
-      this.stepT -= dt * 1.5;
-      if (this.stepT <= 0) { this.stepT = 1; this.audio && this.audio.swim(); }
+    if (this.mode === 'swim' && moving) {
+      this.stepT -= dt * 1.4;
+      if (this.stepT <= 0) { this.stepT = 1; this.audio && this.audio.swim(); this.events.push({ type: 'stroke' }); }
     }
-    a.update(dt);
+  }
+
+  updateCloth(dt) {
+    if (!this.cloth) return;
+    const a = this.anim;
+    const torso = a.bones.torso;
+    if (!torso) return;
+    a.root.updateMatrixWorld(true);
+    const up = this.up;
+    const right = _right.crossVectors(up, this.facing).normalize();
+    const back = this.facing.clone().negate();
+    // anchor points just behind the shoulders, following the posed torso
+    const tw = new THREE.Vector3().setFromMatrixPosition(torso.matrixWorld);
+    const torsoUp = new THREE.Vector3(0, 1, 0).transformDirection(torso.matrixWorld);
+    const torsoBack = new THREE.Vector3(0, 0, -1).transformDirection(torso.matrixWorld);
+    const L = a.look || { height: 1, build: 1 };
+    const sh = 0.62 * L.height;
+    const width = this.clothKind === 'cape' ? 0.3 * L.build : 0.05;
+    const base = tw.clone().addScaledVector(torsoUp, sh).addScaledVector(torsoBack, this.clothKind === 'cape' ? 0.2 : 0.18);
+    const anchors = {
+      a: base.clone().addScaledVector(right, width),
+      b: base.clone().addScaledVector(right, -width),
+    };
+    const body = [
+      { c: tw.clone().addScaledVector(torsoUp, 0.35 * L.height), r: 0.34 * L.build },
+      { c: tw.clone().addScaledVector(torsoUp, 0.05), r: 0.32 * L.build },
+      { c: tw.clone().addScaledVector(torsoUp, -0.35), r: 0.28 },
+    ];
+    const wind = this.vel.clone().multiplyScalar(-1.2).addScaledVector(back, 2).addScaledVector(right, Math.sin(performance.now() / 700) * 1.5);
+    if (this.inWater) wind.multiplyScalar(0.2).addScaledVector(up, 10); // floats in water
+    this.cloth.step(dt, anchors, body, up, back, wind);
   }
 
   sync() {

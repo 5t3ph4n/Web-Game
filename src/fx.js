@@ -50,7 +50,7 @@ export class FX {
     this.shooting = [];
   }
 
-  sprite(kind, pos, { vel, life = 1.2, size = 0.6, additive = false, color } = {}) {
+  sprite(kind, pos, { vel, life = 1.2, size = 0.6, additive = false, color, grav = 0 } = {}) {
     let s = this.pool.pop();
     if (!s) {
       s = new THREE.Sprite(new THREE.SpriteMaterial({ depthWrite: false, transparent: true, fog: false }));
@@ -63,7 +63,7 @@ export class FX {
     s.visible = true;
     s.position.copy(pos);
     s.scale.setScalar(size);
-    s.userData = { vel: vel ? vel.clone() : new THREE.Vector3(), life, max: life, size };
+    s.userData = { vel: vel ? vel.clone() : new THREE.Vector3(), life, max: life, size, grav };
     this.active.push(s);
     return s;
   }
@@ -87,13 +87,38 @@ export class FX {
     }
   }
 
-  addGlow(pos, color = 0xffd27a, size = 2.5) {
+  /** White water spray + a ring of droplets. */
+  splash(pos, n = 12) {
+    const up = pos.clone().normalize();
+    for (let i = 0; i < n; i++) {
+      const v = new THREE.Vector3().randomDirection().addScaledVector(up, 1.6).multiplyScalar(2 + Math.random() * 2.5);
+      this.sprite('spark', pos, { vel: v, life: 0.5 + Math.random() * 0.5, size: 0.35 + Math.random() * 0.3, color: 0xe6f8ff, grav: 9 });
+    }
+  }
+  bubble(pos) {
+    const up = pos.clone().normalize();
+    this.sprite('spark', pos.clone().add(new THREE.Vector3().randomDirection().multiplyScalar(0.2)), { vel: up.multiplyScalar(1.6), life: 1.6, size: 0.18 + Math.random() * 0.12, color: 0xbfeaff });
+  }
+  dust(pos, n = 8, color = 0xd8c8a8) {
+    const up = pos.clone().normalize();
+    for (let i = 0; i < n; i++) {
+      const v = new THREE.Vector3().randomDirection().addScaledVector(up, 0.8).multiplyScalar(1 + Math.random() * 2);
+      this.sprite('spark', pos.clone().addScaledVector(up, 0.2), { vel: v, life: 0.6 + Math.random() * 0.6, size: 0.5 + Math.random() * 0.5, color });
+    }
+  }
+
+  addGlow(pos, color = 0xffd27a, size = 2.5, { light = true, intensity } = {}) {
     const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.tex.spark, color, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, fog: false }));
     s.position.copy(pos); s.scale.setScalar(size);
     s.userData.base = size;
     s.userData.phase = Math.random() * 6;
     this.scene.add(s);
     this.glows.push(s);
+    if (light && this.lights) {
+      const src = { pos: s.position, color, intensity: intensity ?? Math.min(14, 2 + size * 1.6), range: Math.min(26, 6 + size * 2.2), sprite: s };
+      this.lights.add(src);
+      s.userData.light = this.lights.sources[this.lights.sources.length - 1];
+    }
     return s;
   }
 
@@ -180,6 +205,7 @@ export class FX {
       const u = s.userData;
       u.life -= dt;
       if (u.life <= 0) { s.visible = false; this.active.splice(i, 1); this.pool.push(s); continue; }
+      if (u.grav) u.vel.addScaledVector(s.position.clone().normalize(), -u.grav * dt);
       s.position.addScaledVector(u.vel, dt);
       u.vel.multiplyScalar(1 - dt * 1.5);
       const k = u.life / u.max;

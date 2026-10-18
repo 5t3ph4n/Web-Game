@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { R, sample, normalAt, biomeAt, REGIONS, angle } from './planet.js';
 import { globalUniforms, getGradientMap } from './toon.js';
+import { REALISTIC } from './settings.js';
 import { mulberry32 } from './noise.js';
 
 const PLAZAS = REGIONS.filter((r) => r.id === 'village' || r.id === 'harbor');
@@ -26,7 +27,9 @@ export function buildGrass(scene, count = 70000) {
   blade.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
   blade.setAttribute('normal', new THREE.Float32BufferAttribute(new Array(verts.length).fill(0).map((_, i) => (i % 3 === 1 ? 1 : 0)), 3));
 
-  const mat = new THREE.MeshToonMaterial({ gradientMap: getGradientMap(), side: THREE.DoubleSide, vertexColors: false });
+  const mat = REALISTIC
+    ? new THREE.MeshStandardMaterial({ side: THREE.DoubleSide, roughness: 0.85 })
+    : new THREE.MeshToonMaterial({ gradientMap: getGradientMap(), side: THREE.DoubleSide });
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = globalUniforms.uTime;
     shader.uniforms.uWind = globalUniforms.uWind;
@@ -117,8 +120,8 @@ export function buildGrass(scene, count = 70000) {
   }
   scene.add(group);
   return {
-    update(camPos) {
-      for (const im of list) im.visible = im.userData.center.distanceToSquared(camPos) < 70 * 70;
+    update(camPos, dist = 70) {
+      for (const im of list) im.visible = im.userData.center.distanceToSquared(camPos) < dist * dist;
     },
   };
 }

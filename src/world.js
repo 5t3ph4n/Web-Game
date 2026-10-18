@@ -7,6 +7,8 @@ import { mulberry32 } from './noise.js';
 import { buildPeople, offsetDir } from './npcs.js';
 import { FX } from './fx.js';
 import { orient, tangent, WATER_DEPTH_SWIM } from './player.js';
+import { Physics } from './physics.js';
+import { waveHeight } from './water.js';
 
 // Models to preload. `wind` = sway strength for foliage.
 const N = (n, wind = 0) => ({ path: 'nature/' + n, wind });
@@ -67,6 +69,7 @@ export async function buildWorld(game) {
   const scatter = new Scatter();
   const rand = mulberry32(2024);
   const fx = new FX(scene);
+  fx.lights = game.lights;
   const world = { scatter, fx, biomeHere: 'village', regionHere: null, seats: [] };
   game.world = world;
 
@@ -309,6 +312,7 @@ export async function buildWorld(game) {
     return { start: offsetDir(center, de * start, dn * start), end: last, deck };
   }
 
+  const this_turn = (g) => g.input.axes().x * 0.08;
   // ---------------------------------------------------------------- Rowboat (rideable)
   {
     const boatObj = makeObject('boats/boat-row-large');
@@ -362,9 +366,17 @@ export async function buildWorld(game) {
         }
       } else boat.speed *= 1 - dt;
       tangent(boat.facing, up);
-      boat.obj.position.copy(boat.dir).multiplyScalar(R - 0.25 + Math.sin(g.time * 1.4) * 0.08);
+      // ride the actual wave field: height plus pitch/roll from the local slope
+      const bp = boat.dir.clone().multiplyScalar(R);
+      const side = new THREE.Vector3().crossVectors(up, boat.facing).normalize();
+      const hC = waveHeight(bp, g.time);
+      const hF = waveHeight(bp.clone().addScaledVector(boat.facing, 1.6), g.time), hB = waveHeight(bp.clone().addScaledVector(boat.facing, -1.6), g.time);
+      const hL = waveHeight(bp.clone().addScaledVector(side, 0.9), g.time), hR = waveHeight(bp.clone().addScaledVector(side, -0.9), g.time);
+      boat.obj.position.copy(boat.dir).multiplyScalar(R - 0.3 + (hC + hF + hB) / 3);
       orient(boat.obj, up, boat.facing);
-      boat.obj.rotateZ(Math.sin(g.time * 1.2) * 0.04 + (boat.riding ? -0.0 : 0));
+      boat.obj.rotateX(-Math.atan2(hF - hB, 3.2) - boat.speed * 0.006);
+      boat.obj.rotateZ(Math.atan2(hL - hR, 1.8) + (boat.riding ? -this_turn(g) : 0));
+      if (boat.riding) { p.pos.copy(boat.obj.position).addScaledVector(up, 0.35); p.obj.position.copy(p.pos); p.obj.quaternion.copy(boat.obj.quaternion); }
     });
   }
 
@@ -558,8 +570,9 @@ export async function buildWorld(game) {
     prop('campfire_logs', cd, { scale: 4 });
     prop('tent_detailedOpen', at('forest', -12, -3), { scale: 5, yaw: 2.4, collide: 1.8 });
     prop('tent_smallClosed', at('forest', -3, -13), { scale: 5, yaw: -0.3, collide: 1.5 });
-    const fire = fx.addGlow(surfPos(cd, 0.8), 0xff8a3a, 3.5);
+    const fire = fx.addGlow(surfPos(cd, 0.8), 0xff8a3a, 3.5, { intensity: 12 });
     fire.userData.always = true;
+    fire.userData.light.flicker = 0.35;
     game.updaters.push((dt, gm) => {
       fire.scale.setScalar(3 + Math.sin(gm.time * 13) * 0.3 + Math.random() * 0.4);
       if (Math.random() < dt * 6 && fire.position.distanceToSquared(gm.player.pos) < 900) {
@@ -835,7 +848,7 @@ export async function buildWorld(game) {
     m.position.copy(pos);
     m.castShadow = true;
     scene.add(m);
-    const glow = fx.addGlow(pos, 0xffe27a, 2.2); glow.userData.always = true;
+    const glow = fx.addGlow(pos, 0xffe27a, 2.2, { light: false }); glow.userData.always = true;
     world.stars.push({ id, m, pos, glow, dir: dir.clone() });
   };
   {
@@ -883,66 +896,89 @@ export async function buildWorld(game) {
     }
   });
 
-  // ---------------------------------------------------------------- kickable balls
+  // ---------------------------------------------------------------- physics props
+  const physics = new Physics(game);
+  world.physics = physics;
+  game.physics = physics;
   {
-    const balls = [];
-    const ballSpots = [[at('village', -4, -4), 0xf26b6b], [at('harbor', 6, -10), 0x6bb7f2], [at('isle', 0, 4), 0xffd166], [at('meadow', 2, -2), 0xa0e07a], [at('lighthouse', -6, -6), 0xf6a6d9]];
-    for (const [d, color] of ballSpots) {
+    const ballGeo = new THREE.IcosahedronGeometry(0.55, 3);
+    const makeBall = (color, stripe = 0xffffff) => {
       const g = new THREE.Group();
-      const m = new THREE.Mesh(new THREE.IcosahedronGeometry(0.55, 2), toonMaterial({ color }));
-      const band = new THREE.Mesh(new THREE.TorusGeometry(0.555, 0.07, 6, 20), toonMaterial({ color: 0xffffff }));
-      m.castShadow = true; g.add(m, band);
-      scene.add(g);
-      const b = { g, pos: surfPos(d, 0.55), vel: new THREE.Vector3(), vUp: 0, home: d.clone() };
-      balls.push(b);
-    }
-    const _q = new THREE.Quaternion();
-    game.updaters.push((dt, gm) => {
-      const p = gm.player;
-      for (const b of balls) {
-        const up = b.pos.clone().normalize();
-        if (b.pos.distanceToSquared(p.pos) > 120 * 120) continue;
-        // kick
-        const toB = b.pos.clone().sub(p.pos.clone().addScaledVector(p.up, 0.5));
-        if (toB.length() < 1.1) {
-          const push = tangent(toB.clone(), up);
-          b.vel.copy(push).multiplyScalar(Math.max(4, p.speed * 1.6));
-          b.vUp = 2 + p.speed * 0.5;
-          audio.kick();
-        }
-        tangent(b.vel.lengthSq() > 1e-8 ? b.vel : b.vel.set(0, 0, 0), up);
-        const sp = b.vel.length();
-        b.pos.addScaledVector(b.vel, dt);
-        b.vUp -= 20 * dt;
-        let r = b.pos.length() + b.vUp * dt;
-        const nd = b.pos.clone().normalize();
-        const gh = sample(nd);
-        const floor = R + Math.max(gh, -0.5) + 0.55;
-        if (r < floor) { r = floor; if (b.vUp < -2) b.vUp = -b.vUp * 0.55; else b.vUp = 0; }
-        b.pos.copy(nd).multiplyScalar(r);
-        if (gh < 0) b.vUp += 10 * dt; // floats
-        b.vel.multiplyScalar(1 - dt * (r <= floor + 0.05 ? 1.2 : 0.2));
-        // bump into colliders
-        const res = gm.colliders.near(b.pos);
-        for (const c of res) {
-          const dd = b.pos.clone().sub(c.pos); dd.addScaledVector(c.up, -dd.dot(c.up));
-          if (dd.length() < c.r + 0.55 && b.pos.length() < c.base + c.top) {
-            const nrm = dd.normalize();
-            b.pos.addScaledVector(nrm, c.r + 0.55 - b.pos.clone().sub(c.pos).addScaledVector(c.up, -b.pos.clone().sub(c.pos).dot(c.up)).length());
-            b.vel.addScaledVector(nrm, -2 * b.vel.dot(nrm)).multiplyScalar(0.7);
-          }
-        }
-        b.g.position.copy(b.pos);
-        if (sp > 0.01) {
-          const axis = new THREE.Vector3().crossVectors(up, b.vel).normalize();
-          _q.setFromAxisAngle(axis, (sp * dt) / 0.55);
-          b.g.quaternion.premultiply(_q);
-        }
-        // respawn if lost at sea for long
-        if (gh < -6 && b.pos.distanceTo(p.pos) > 60) { b.pos.copy(surfPos(b.home, 0.6)); b.vel.set(0, 0, 0); }
-      }
-    });
+      const m = new THREE.Mesh(ballGeo, toonMaterial({ color, roughness: 0.35 }));
+      const band = new THREE.Mesh(new THREE.TorusGeometry(0.555, 0.07, 6, 24), toonMaterial({ color: stripe, roughness: 0.35 }));
+      const band2 = band.clone(); band2.rotation.y = Math.PI / 2;
+      m.castShadow = true; g.add(m, band, band2);
+      return g;
+    };
+    const fromModel = (path, scale) => {
+      const o = makeObject(path);
+      const box = new THREE.Box3().setFromObject(o);
+      const size = box.getSize(new THREE.Vector3()).multiplyScalar(scale);
+      const center = box.getCenter(new THREE.Vector3()).multiplyScalar(scale);
+      o.scale.setScalar(scale);
+      o.position.sub(center);
+      const g = new THREE.Group(); g.add(o);
+      return { g, radius: Math.max(size.x, size.y, size.z) * 0.45 };
+    };
+    const place = (dir, lift) => surfPos(dir, lift);
+    const kinds = {
+      ball: (color) => ({ obj: makeBall(color), radius: 0.55, mass: 0.5, bounce: 0.72, friction: 0.35, density: 0.15, name: 'Beach ball' }),
+      crate: () => { const m = fromModel('survival/box', 2.6); return { obj: m.g, radius: m.radius, mass: 2, bounce: 0.15, friction: 1.6, density: 0.7, roll: false, name: 'Crate' }; },
+      barrel: () => { const m = fromModel('survival/barrel', 2.6); return { obj: m.g, radius: m.radius, mass: 3.5, bounce: 0.2, friction: 0.8, density: 0.5, name: 'Barrel' }; },
+      pumpkin: () => { const m = fromModel('nature/crop_pumpkin', 4.5); return { obj: m.g, radius: m.radius, mass: 1.5, bounce: 0.25, friction: 1, density: 0.8, name: 'Pumpkin' }; },
+      melon: () => { const m = fromModel('nature/crop_melon', 4.5); return { obj: m.g, radius: m.radius, mass: 1.2, bounce: 0.3, friction: 0.8, density: 0.9, name: 'Melon' }; },
+      snowball: () => { const o = new THREE.Mesh(new THREE.IcosahedronGeometry(0.32, 2), toonMaterial({ color: 0xf6fbff, roughness: 0.6 })); o.castShadow = true; return { obj: o, radius: 0.32, mass: 0.4, bounce: 0.1, friction: 2, density: 0.9, name: 'Snowball' }; },
+      boulder: () => { const m = fromModel('nature/rock_smallA', 7); return { obj: m.g, radius: Math.max(0.6, m.radius), mass: 8, bounce: 0.1, friction: 1.2, density: 2.6, name: 'Boulder', holdable: false }; },
+    };
+    const spawn = (kind, dir, arg) => {
+      const k = kinds[kind](arg);
+      scene.add(k.obj);
+      return physics.add({ ...k, pos: place(dir, k.radius + 0.05) });
+    };
+    // beach balls
+    [[at('village', -4, -4), 0xf26b6b], [at('harbor', 6, -10), 0x6bb7f2], [at('isle', 0, 4), 0xffd166], [at('meadow', 2, -2), 0xa0e07a], [at('lighthouse', -6, -6), 0xf6a6d9]]
+      .forEach(([d, c]) => spawn('ball', d, c));
+    // market crates & barrels
+    for (let i = 0; i < 4; i++) spawn('crate', at('village', 7 + i * 1.3, -2.5 - (i % 2) * 1.2));
+    for (let i = 0; i < 2; i++) spawn('barrel', at('village', -11 + i * 1.4, 4));
+    // harbor cargo
+    for (let i = 0; i < 5; i++) spawn(i % 2 ? 'barrel' : 'crate', at('harbor', 8 + i * 1.4, -7 + (i % 3)));
+    // farm produce
+    for (let i = 0; i < 6; i++) spawn('pumpkin', at('farm', -5 + i * 1.5, -19));
+    for (let i = 0; i < 4; i++) spawn('melon', at('farm', 6 + i * 1.3, -3));
+    // snowballs
+    for (let i = 0; i < 10; i++) spawn('snowball', at('frost', 6 + (i % 5) * 0.9, 2 + Math.floor(i / 5) * 0.9));
+    // boulders to shove around on the mountain path and in the desert
+    for (let i = 0; i < 3; i++) spawn('boulder', at('mountain', -20 + i * 3, -26));
+    for (let i = 0; i < 3; i++) spawn('boulder', at('desert', 10 + i * 3, 4));
+    // a few crates bobbing in the harbour
+    for (let i = 0; i < 3; i++) { const d = at('harbor', 30 + i * 4, 6); if (sample(d) < -1) { const b = spawn('crate', d); b.pos.copy(d).multiplyScalar(R + 0.3); } }
   }
+  game.updaters.push((dt, gm) => physics.update(dt, gm));
+
+  // player events: splashes, bubbles, hard landings
+  game.updaters.push((dt, gm) => {
+    const p = gm.player;
+    for (const e of p.events) {
+      if (e.type === 'splash') {
+        const sp = p.pos.clone().setLength(R + 0.1);
+        fx.splash(sp, e.big ? 26 : 10);
+        audio.splash();
+      } else if (e.type === 'bubble') {
+        fx.bubble(p.pos.clone().addScaledVector(p.up, 1.5).addScaledVector(p.facing, 0.3));
+      } else if (e.type === 'outOfBreath') {
+        ui.toast('Out of breath! Swimming up for air…');
+      } else if (e.type === 'hardLand') {
+        gm.follow.shake = Math.min(1.5, e.impact / 20);
+        fx.dust(p.pos, 14);
+      } else if (e.type === 'step' && (gm.world.biomeHere === 'desert' || gm.world.biomeHere === 'snow' || gm.world.biomeHere === 'beach') && p.speed > 6) {
+        fx.dust(p.pos, 2, gm.world.biomeHere === 'snow' ? 0xffffff : 0xe8d2a0);
+      } else if (e.type === 'stroke') {
+        fx.splash(p.pos.clone().setLength(R + 0.15).addScaledVector(p.facing, 0.8), 4);
+      }
+    }
+    p.events.length = 0;
+  });
 
   // ---------------------------------------------------------------- jumping fish at the reef & sea
   {
