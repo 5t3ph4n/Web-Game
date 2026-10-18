@@ -248,7 +248,7 @@ export class UI {
         <p class="cc-note">Changing the art style reloads the game. Your progress is kept.</p>
         <label class="toggle"><input type="checkbox" id="st-ink" ${settings.outlines ? 'checked' : ''}> <span>Ink outlines</span></label>
         <label class="toggle"><input type="checkbox" id="st-music" ${settings.music ? 'checked' : ''}> <span>Music</span></label>
-        <label class="toggle"><input type="checkbox" id="st-lamp" ${g.lights.carryOn ? 'checked' : ''}> <span>Carry a lantern at night (L)</span></label>
+        <label class="toggle"><input type="checkbox" id="st-lamp" ${g.lights.carryOn ? 'checked' : ''}> <span>Light a torch in dark places (L)</span></label>
       </div>`);
     el.querySelector('.close').addEventListener('click', () => this.toggleSettings());
     el.querySelectorAll('.chips[data-k=quality] .chip').forEach((b) => b.addEventListener('click', () => {
@@ -436,7 +436,7 @@ export class UI {
           <tr><td><b>C</b> / Ctrl</td><td>Dive under water (watch your air!)</td></tr>
           <tr><td><b>F</b></td><td>Pick up / throw balls, crates, fruit and snowballs</td></tr>
           <tr><td><b>K</b></td><td>Character creator</td></tr>
-          <tr><td><b>L</b></td><td>Toggle your night lantern</td></tr>
+          <tr><td><b>L</b></td><td>Torch on/off in dark places</td></tr>
           <tr><td><b>E</b> / Click</td><td>Talk, pet, sit, ride, read</td></tr>
           <tr><td><b>Drag</b> · <b>Scroll</b></td><td>Look around · Zoom</td></tr>
           <tr><td><b>J</b> / Tab</td><td>Journal</td></tr>
@@ -537,7 +537,7 @@ export class UI {
     if (input.hit('KeyP')) this.togglePhoto();
     if (input.hit('KeyM')) this.hudEl.querySelector('.mute-btn').click();
     if (input.hit('KeyK') && !this.modal) this.openCreator();
-    if (input.hit('KeyL')) { game.lights.carryOn = !game.lights.carryOn; this.toast(game.lights.carryOn ? 'Lantern on' : 'Lantern off'); }
+    if (input.hit('KeyL')) { game.lights.carryOn = !game.lights.carryOn; this.toast(game.lights.carryOn ? 'Torch: lights itself when it gets dark' : 'Torch put away'); }
     // breath meter
     const br = this.hudEl.querySelector('.breath');
     const showBreath = player.mode === 'dive' || player.breath < 0.999;

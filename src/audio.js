@@ -60,6 +60,9 @@ export class Audio {
   swim() { this.noise(0.35, { freq: 900, q: 0.5, type: 'lowpass', gain: 0.15, attack: 0.08 }); }
   jump() { this.tone(330, 0.16, { type: 'triangle', gain: 0.08, slide: 1.8 }); }
   land() { this.noise(0.12, { freq: 260, q: 0.7, gain: 0.22 }); }
+  ignite() { this.noise(0.55, { freq: 500, q: 0.5, type: 'lowpass', gain: 0.22, attack: 0.06 }); this.noise(0.25, { freq: 2600, q: 1.2, gain: 0.04, attack: 0.02 }); }
+  hiss() { this.noise(0.8, { freq: 5000, q: 0.6, type: 'highpass', gain: 0.1, attack: 0.01 }); }
+  crackle() { this.noise(0.025, { freq: 1800 + Math.random() * 2500, q: 3, gain: 0.025 + Math.random() * 0.03 }); }
   splash() { this.noise(0.6, { freq: 1200, q: 0.4, type: 'lowpass', gain: 0.35, attack: 0.01 }); }
   bounce() { this.tone(180, 0.35, { type: 'sine', gain: 0.25, slide: 3.2 }); this.tone(360, 0.25, { type: 'triangle', gain: 0.06, slide: 2.5 }); }
   kick() { this.noise(0.08, { freq: 300, q: 1, gain: 0.3 }); this.tone(140, 0.12, { gain: 0.15, slide: 0.6 }); }

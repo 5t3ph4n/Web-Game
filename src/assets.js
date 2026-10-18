@@ -38,7 +38,7 @@ export async function preloadModels(list, onProgress) {
         if (!g.attributes.uv) {
           g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(g.attributes.position.count * 2), 2));
         }
-        const m = toonify(o.material, { wind, windows: path.startsWith('houses/building') });
+        const m = toonify(o.material, { wind, windows: path.startsWith('houses/building'), detail: true });
         if (!byMat.has(m)) byMat.set(m, []);
         byMat.get(m).push(g.index ? g.toNonIndexed() : g);
       });

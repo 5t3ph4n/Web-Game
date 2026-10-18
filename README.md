@@ -29,7 +29,7 @@ The build is fully static, so `dist/` can be hosted anywhere. A GitHub Pages wor
 | E / click | Talk, pet, sit, read, ride, ring bells, pick things up… |
 | F | Pick up / throw balls, crates, barrels, fruit and snowballs |
 | K | Character creator |
-| L | Toggle your lantern at night |
+| L | Torch on/off in dark places |
 | Mouse drag · scroll | Orbit camera · zoom |
 | J / Tab | Journal (places, friends, critters, fast travel) |
 | P | Photo mode (hides the UI) |
@@ -64,8 +64,14 @@ scarf simulated as cloth). Your look is saved with your game.
   *Storybook* is the original cel-shaded look with ink outlines.
 - **Quality presets** (Low / Medium / High) change resolution, shadow detail, anti-aliasing, AO, bloom,
   the number of dynamic lights and draw distance. The game steps down automatically if it runs slowly.
-- **Dynamic lights**: lanterns, campfires, glowing mushrooms, the lighthouse and your own lantern light up
-  the night, and house windows glow.
+- **Textures**: procedural surface detail in the shaders: grass tufts and patches, rippled and glinting
+  sand, layered rock, sparkling snow, gravel paths and cobbled town squares, plus wood grain, bark, leaf
+  veins and weathered stone on props, all with bump-mapped lighting.
+- **Dark nights & lights**: nights are properly dark. Street lamps line the roads between places, and
+  lanterns, campfires, glowing mushrooms, the lighthouse and house windows light up the night.
+- **Torch**: in really dark places (out at night away from lamps, or deep in the woods after dusk) your
+  character pulls out a flickering torch that lights the way, throws embers and goes out with a hiss if you
+  swim. Press L to turn this off.
 - **Water**: a see-through sea with wave normals, sky reflections and sun glints; caustics and light shafts
   underwater, with fog that thickens with depth.
 - **Swimming**: in deep water you swim at the surface (front crawl when moving, treading water when still)
@@ -100,9 +106,10 @@ music and sound effects. Progress is saved in your browser.
 - **Planet**: cube-sphere terrain generated from simplex noise, region "cones", terracing, land-bridge paths
   and flattened plazas (`src/planet.js`).
 - **Look**: a material factory (`src/toon.js`) that builds PBR or cel materials depending on the art style,
-  with shader hooks for wind sway, see-through occluders, terrain detail bump, caustics and lit windows. A
+  with shader hooks for wind sway, see-through occluders, procedural terrain/prop textures (noise, Voronoi pebbles and cobbles, bump), caustics and lit windows. A
   custom render pipeline (`src/post.js`): HDR scene pass → SSAO → ink lines / underwater → bloom → ACES.
-  Dynamic lights come from a fixed pool assigned to the nearest sources each frame (`src/lights.js`).
+  Dynamic lights come from a fixed pool assigned to the nearest sources each frame (`src/lights.js`); the torch is a
+  separate light on the hand bone (`src/torch.js`).
 - **Physics**: rigid-body props with spherical gravity, buoyancy and impulses (`src/physics.js`); cloth
   capes are a verlet grid pinned to the shoulders (`Cloth` in `src/character.js`).
 - **Characters**: the creator recolours the shared Kenney palette per vertex region (skin, hair, top,

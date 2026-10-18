@@ -250,12 +250,15 @@ export function buildTerrain(material, res = 150) {
   const d = new THREE.Vector3();
   const nrm = new THREE.Vector3();
   const seabedHeights = [];
+  const sw = [0, 0, 0, 0, 0];
 
   for (const [N, U, V] of faces) {
     const vcount = (res + 1) * (res + 1);
     const pos = new Float32Array(vcount * 3);
     const nor = new Float32Array(vcount * 3);
     const colr = new Float32Array(vcount * 3);
+    const surfA = new Float32Array(vcount * 3); // sand, rock, snow
+    const surfB = new Float32Array(vcount * 2); // gravel path, cobbles
     let k = 0;
     for (let j = 0; j <= res; j++) {
       for (let i = 0; i <= res; i++) {
@@ -267,8 +270,10 @@ export function buildTerrain(material, res = 150) {
         pos[k * 3] = d.x * (R + h); pos[k * 3 + 1] = d.y * (R + h); pos[k * 3 + 2] = d.z * (R + h);
         normalAt(d, nrm, 0.006);
         nor[k * 3] = nrm.x; nor[k * 3 + 1] = nrm.y; nor[k * 3 + 2] = nrm.z;
-        terrainColor(d, h, nrm, info, col, tmpC, tmpC2);
+        terrainColor(d, h, nrm, info, col, tmpC, tmpC2, sw);
         colr[k * 3] = col.r; colr[k * 3 + 1] = col.g; colr[k * 3 + 2] = col.b;
+        surfA[k * 3] = sw[0]; surfA[k * 3 + 1] = sw[1]; surfA[k * 3 + 2] = sw[2];
+        surfB[k * 2] = sw[3]; surfB[k * 2 + 1] = sw[4];
         k++;
       }
     }
@@ -285,6 +290,8 @@ export function buildTerrain(material, res = 150) {
     g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     g.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
     g.setAttribute('color', new THREE.BufferAttribute(colr, 3));
+    g.setAttribute('surfA', new THREE.BufferAttribute(surfA, 3));
+    g.setAttribute('surfB', new THREE.BufferAttribute(surfB, 2));
     g.setIndex(new THREE.BufferAttribute(idx, 1));
     // ensure outward winding
     g.computeBoundingSphere();
@@ -304,10 +311,15 @@ export function buildTerrain(material, res = 150) {
   return group;
 }
 
-function terrainColor(d, h, nrm, info, out, tmp, tmp2) {
+/**
+ * Vertex colour of the ground, plus `sw` = weights of the surface textures the shader paints on top:
+ * [sand, rock, snow, gravel path, cobbles] (whatever is left over is grass).
+ */
+function terrainColor(d, h, nrm, info, out, tmp, tmp2, sw = [0, 0, 0, 0, 0]) {
   // biome blend
   out.setRGB(0, 0, 0);
   let tot = 0;
+  let sandW = 0, snowW = 0, rockW = 0;
   const vary = noiseB(d.x * 30, d.y * 30, d.z * 30) * 0.5 + 0.5;
   const w = info.weights;
   for (let i = 0; i < w.length; i += 2) {
@@ -316,7 +328,11 @@ function terrainColor(d, h, nrm, info, out, tmp, tmp2) {
     tmp.setHex(pal[0]).lerp(tmp2.setHex(pal[1]), vary);
     out.r += tmp.r * w[i + 1]; out.g += tmp.g * w[i + 1]; out.b += tmp.b * w[i + 1];
     tot += w[i + 1];
+    if (reg.biome === 'desert') sandW += w[i + 1];
+    if (reg.biome === 'snow') snowW += w[i + 1];
+    if (reg.biome === 'crater') rockW += w[i + 1] * 0.5;
   }
+  if (tot > 0.001) { sandW /= tot; snowW /= tot; rockW /= tot; }
   if (tot < 0.001) { out.setHex(0x93c06c); tot = 1; } else out.multiplyScalar(1 / tot);
 
   const slope = nrm.dot(d); // 1 = flat
@@ -324,8 +340,10 @@ function terrainColor(d, h, nrm, info, out, tmp, tmp2) {
   const beach = 1 - smoothstep(0.7, 1.6, h);
   if (beach > 0) out.lerp(C_SAND, beach);
   if (h < -0.2) out.lerp(C_SEABED, smoothstep(-0.2, -2, h));
+  sandW = Math.max(sandW, beach, smoothstep(-0.2, -1, h));
   // paths
-  if (info.path > 0 && h > 0.6) out.lerp(C_PATH, info.path * 0.85);
+  const pathW = info.path > 0 && h > 0.6 ? info.path * 0.85 : 0;
+  if (pathW > 0) out.lerp(C_PATH, pathW);
   // town plazas: warm cobbles with a subtle pattern
   if (info.plaza > 0) {
     const cob = noise(d.x * 260, d.y * 260, d.z * 260) > 0.25 ? 0.92 : 1.0;
@@ -334,9 +352,21 @@ function terrainColor(d, h, nrm, info, out, tmp, tmp2) {
   // rock on steep slopes
   const rock = 1 - smoothstep(0.72, 0.86, slope);
   if (rock > 0 && h > 0.5) out.lerp(vary > 0.5 ? C_ROCK : C_ROCK_DARK, rock);
+  if (h > 0.5) rockW = Math.max(rockW, rock);
   // snow caps on high ground
   const snow = smoothstep(17, 21, h + vary * 3) * smoothstep(0.6, 0.8, slope);
   if (snow > 0) out.lerp(C_SNOW, snow);
+  snowW = Math.max(snowW, snow);
+  // texture weights, layered the same way as the colours (later layers cover earlier ones)
+  const plaza = info.plaza || 0;
+  let path = pathW * (1 - plaza);
+  let cob = plaza;
+  let sand = sandW * (1 - pathW) * (1 - plaza);
+  const keep = 1 - rockW;
+  sand *= keep; path *= keep; cob *= keep;
+  let rk = rockW;
+  const keep2 = 1 - snowW;
+  sw[0] = sand * keep2; sw[1] = rk * keep2; sw[2] = snowW; sw[3] = path * keep2; sw[4] = cob * keep2;
   // painterly speckle
   const sp = noise(d.x * 140, d.y * 140, d.z * 140);
   out.multiplyScalar(1 + sp * 0.05);

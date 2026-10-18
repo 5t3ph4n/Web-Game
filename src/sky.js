@@ -191,7 +191,6 @@ export class Sky {
     if (this.envRT) this.envRT.dispose();
     this.envRT = rt;
     this.scene.environment = rt.texture;
-    this.scene.environmentIntensity = 0.35;
     this.dome.position.copy(oldPos);
   }
 
@@ -241,12 +240,14 @@ export class Sky {
     this.ambient.color.copy(this.skyHorizon).lerp(new THREE.Color(1, 1, 1), 0.55);
     this.ambient.intensity = amb;
     if (REALISTIC) {
-      this.sun.intensity = sunI * 1.25 * (1 - this.night * 0.6);
-      this.ambient.intensity = amb * 0.12 * (1 - this.night * 0.5);
+      // nights are properly dark (lamps, windows and your torch do the work)
+      this.sun.intensity = sunI * 1.25 * (1 - this.night * 0.72);
+      this.ambient.intensity = amb * 0.12 * (1 - this.night * 0.7);
+      this.scene.environmentIntensity = 0.35 * (1 - this.night * 0.65);
       this.hemi.position.copy(up);
       this.hemi.color.copy(this.skyTop).lerp(new THREE.Color(1, 1, 1), 0.35);
       this.hemi.groundColor.setHex(0x5f5a48).multiplyScalar(0.6 + (1 - this.night) * 0.4);
-      this.hemi.intensity = amb * 0.85 * (1 - this.night * 0.55);
+      this.hemi.intensity = amb * 0.85 * (1 - this.night * 0.72);
     }
 
     // dome

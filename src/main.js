@@ -1,10 +1,11 @@
 import * as THREE from 'three';
 import './style.css';
 import { R, buildTerrain, sample, regionAt, regionById, tangentBasis } from './planet.js';
-import { toonMaterial, globalUniforms, addCaustics, setNight } from './toon.js';
+import { toonMaterial, globalUniforms, addTerrainShading, setNight } from './toon.js';
 import { PostFX } from './post.js';
 import { settings, saveSettings, REALISTIC, q, QUALITY } from './settings.js';
 import { LightPool } from './lights.js';
+import { Torch } from './torch.js';
 import { waveHeight } from './water.js';
 import { Sky } from './sky.js';
 import { buildWater } from './water.js';
@@ -56,7 +57,7 @@ async function boot() {
   if (save.data.time !== undefined) sky.time = save.data.time;
 
   const terrainMat = toonMaterial({ vertexColors: true, roughness: 0.95 }, { fade: false });
-  if (REALISTIC) addCaustics(terrainMat);
+  if (REALISTIC) addTerrainShading(terrainMat);
   const terrain = buildTerrain(terrainMat, 150);
   scene.add(terrain);
   ui.loading(0.25, 'Filling the oceans…');
@@ -90,10 +91,14 @@ async function boot() {
   };
   const world = await buildWorld(game);
   game.world = world;
+  const torch = new Torch(scene, world.fx, audio);
+  torch.attach(playerAnim);
+  game.torch = torch;
   // swap the player's look (character creator)
   game.setLook = async (lk, persist) => {
     const a = await makeCharacter(lk);
     player.setAnim(a, scene);
+    torch.attach(a);
     if (player.holding) player.holding = null;
     save.data.look = lk;
     save.data.skin = lk.base;
@@ -219,6 +224,7 @@ async function boot() {
     sky.updateEnv(renderer, dt);
     water.update();
     lights.update(dt, game);
+    torch.update(still ? 0 : dt, game);
     setNight(sky.night);
     world.scatter.update(camera.position, q().viewDist);
     grass.update(camera.position, q().grassDist);

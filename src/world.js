@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { R, sample, normalAt, regionAt, regionById, REGIONS, biomeAt, tangentBasis, angle } from './planet.js';
+import { R, sample, normalAt, regionAt, regionById, REGIONS, PATHS, biomeAt, tangentBasis, angle } from './planet.js';
 import { Scatter, surfaceMatrix, surfaceQuat, makeObject, getModel, modelCollider, trunkRadius } from './assets.js';
 import { resolve } from './collision.js';
 import { IS_TOUCH } from './input.js';
@@ -62,6 +62,8 @@ const AUTO_COLLIDE = (path) => {
   if (/cactus|rock_large|stone_large|rock-sand|rock_tall|stone_tall|log|stump|statue|mushroom_.*Tall/.test(path)) return 'mesh';
   return false;
 };
+
+const _ln = new THREE.Vector3();
 
 export async function buildWorld(game) {
   const { scene, colliders, audio, save, ui } = game;
@@ -891,6 +893,38 @@ export async function buildWorld(game) {
       const small = /flower|grass|bush|mushroom_(red|tan)$|Group|lily|rock_small|stone_small/.test(name);
       prop(name, d, { yaw: rand() * 6.283, scale, lift: -0.05, shadow: !small || /bushLarge|bushDetailed/.test(name) });
     }
+  }
+
+  // ---------------------------------------------------------------- street lamps along the roads
+  {
+    const placed = [];
+    const SPACING = 13, SIDE = 0.024; // metres between lamps, radians off the road's centre line (~2.4 m)
+    for (const [a, b] of PATHS) {
+      const A = regionById[a].dir, B = regionById[b].dir;
+      const len = angle(A, B);
+      const axis = new THREE.Vector3().crossVectors(A, B).normalize();
+      const n = Math.floor((len * R) / SPACING);
+      for (let i = 1; i < n; i++) {
+        const c = A.clone().applyAxisAngle(axis, (len * i) / n);
+        // town centres have their own lanterns
+        if (angle(c, A) < 0.09 || angle(c, B) < 0.09) continue;
+        const d = c.clone().addScaledVector(axis, i % 2 ? SIDE : -SIDE).normalize();
+        const h = sample(d);
+        if (h < 0.7) continue;
+        if (placed.some((p) => angle(p, d) < 0.07)) continue; // where roads meet
+        normalAt(d, _ln);
+        if (_ln.dot(d) < 0.9) continue;
+        // not inside a house, tree or rock
+        const base = d.clone().multiplyScalar(R + h);
+        const res = resolve(colliders, base, 0.7, { height: 2.5 });
+        if (res.push.lengthSq() > 1e-6 || res.floor > base.length() + 0.25) continue;
+        prop('town/lantern', d, { yaw: yawToward(d, c), scale: 2.4, collide: 'mesh' });
+        const glow = fx.addGlow(surfPos(d, 3.5), 0xffc46b, 3);
+        glow.userData.onAt = 0.08 + Math.random() * 0.12; // lamps come on one after another at dusk
+        placed.push(d);
+      }
+    }
+    world.streetLamps = placed;
   }
 
   // ---------------------------------------------------------------- Stardrops (collectibles)

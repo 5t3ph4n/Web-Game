@@ -214,7 +214,7 @@ export class FX {
     }
     // night glows
     for (const g of this.glows) {
-      g.visible = (sky.night > 0.05 || g.userData.always) && g.position.distanceToSquared(player.pos) < 130 * 130;
+      g.visible = (sky.night > (g.userData.onAt ?? 0.05) || g.userData.always) && g.position.distanceToSquared(player.pos) < 130 * 130;
       g.material.opacity = Math.max(sky.night, g.userData.always ? 0.6 : 0) * (0.85 + Math.sin(game.time * 3 + g.userData.phase) * 0.15);
     }
     // butterflies (daytime, in flowery places)

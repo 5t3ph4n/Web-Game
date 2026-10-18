@@ -17,9 +17,7 @@ export class LightPool {
       scene.add(l);
       this.pool.push(l);
     }
-    // the player's own little lantern
-    this.carry = new THREE.PointLight(0xffd29a, 0, 11, 1.4);
-    scene.add(this.carry);
+    // light a torch automatically in dark places (toggled with L)
     this.carryOn = true;
     this._tmp = [];
   }
@@ -33,12 +31,13 @@ export class LightPool {
     const active = q().lights;
     const list = this._tmp;
     list.length = 0;
+    this.night = night;
     for (const s of this.sources) {
       if (s.sprite) {
         s.night = !s.sprite.userData.always;
         if (s.sprite.scale.x === 0) continue;
       }
-      if (s.night && night < 0.02) continue;
+      if (s.night && night < (s.sprite?.userData.onAt ?? 0.02)) continue;
       const d2 = s.pos.distanceToSquared(player.pos);
       if (d2 > 70 * 70) continue;
       list.push([d2, s]);
@@ -47,9 +46,10 @@ export class LightPool {
     for (let i = 0; i < this.pool.length; i++) {
       const l = this.pool[i];
       const e = i < active ? list[i] : null;
-      if (!e) { l.intensity = 0; l.visible = false; continue; }
+      // keep the number of visible lights fixed (changing it recompiles every shader); unused ones just go dark
+      l.visible = i < active;
+      if (!e) { l.intensity = 0; continue; }
       const s = e[1];
-      l.visible = true;
       l.position.copy(s.pos);
       l.color.copy(s.col);
       l.distance = s.range;
@@ -59,9 +59,19 @@ export class LightPool {
       k *= 1 - THREE.MathUtils.smoothstep(e[0], 45 * 45, 65 * 65);
       l.intensity = s.intensity * k;
     }
-    // carried lantern
-    const want = this.carryOn ? THREE.MathUtils.smoothstep(night, 0.35, 0.8) : 0;
-    this.carry.intensity += (want * 5 - this.carry.intensity) * Math.min(1, dt * 3);
-    this.carry.position.copy(player.pos).addScaledVector(player.up, 2.2).addScaledVector(player.facing, 0.6);
+  }
+  /** Roughly how brightly the lamps, fires and windows around light point p (0 = pitch dark, ~1 = well lit). */
+  litAt(p) {
+    let lit = 0;
+    for (const s of this.sources) {
+      if (s.sprite && s.sprite.scale.x === 0) continue;
+      const k = s.night ? this.night || 0 : 1;
+      if (k < 0.02) continue;
+      const d2 = s.pos.distanceToSquared(p);
+      const r = s.range * 0.55;
+      if (d2 > s.range * s.range * 1.5) continue;
+      lit += (s.intensity / 6) * k / (1 + d2 / (r * r));
+    }
+    return lit;
   }
 }

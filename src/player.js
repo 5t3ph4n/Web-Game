@@ -13,6 +13,7 @@ const _up = new THREE.Vector3();
 const _n = new THREE.Vector3();
 
 const AIR_STEP = 1.0; // how far below a ledge you can be mid-jump and still pull yourself up onto it
+const TORCH_ARM = { x: -1.05, z: -0.2 };
 const SWIM_STEP = 1.2; // climb out of the water onto anything up to ~25cm above the surface (lily pads, boats)
 
 /** Orient an object so +Y = up and +Z = forward. */
@@ -415,6 +416,12 @@ export class Player {
         if (b['leg-left']) b['leg-left'].rotation.x = Math.sin(st * 1.3) * 0.35;
         if (b['leg-right']) b['leg-right'].rotation.x = -Math.sin(st * 1.3) * 0.35;
       }
+    }
+    // holding a torch up and out in front
+    if (this.torchArm > 0.01 && !water && b['arm-right']) {
+      const arm = b['arm-right'], k = this.torchArm;
+      arm.rotation.x += (TORCH_ARM.x - arm.rotation.x) * k;
+      arm.rotation.z += (TORCH_ARM.z - arm.rotation.z) * k;
     }
     // fairy wings flap
     if (a.wings) {
