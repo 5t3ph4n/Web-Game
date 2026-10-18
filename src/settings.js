@@ -2,9 +2,9 @@
 const KEY = 'wanderer-settings-v1';
 
 export const QUALITY = {
-  low: { dpr: 1, shadow: 1024, ao: false, bloom: false, msaa: 0, lights: 3, grassDist: 45, viewDist: 115 },
-  medium: { dpr: 1.5, shadow: 2048, ao: true, bloom: true, msaa: 0, lights: 6, grassDist: 65, viewDist: 135 },
-  high: { dpr: 2, shadow: 4096, ao: true, bloom: true, msaa: 4, lights: 8, grassDist: 80, viewDist: 150 },
+  low: { dpr: 1, shadow: 1024, ao: false, bloom: false, msaa: 0, lights: 3, grassDist: 45, viewDist: 115, shadowEvery: 2 },
+  medium: { dpr: 1.5, shadow: 2048, ao: true, bloom: true, msaa: 0, lights: 6, grassDist: 65, viewDist: 135, shadowEvery: 2 },
+  high: { dpr: 2, shadow: 4096, ao: true, bloom: true, msaa: 4, lights: 8, grassDist: 80, viewDist: 150, shadowEvery: 1 },
 };
 
 const defaults = {

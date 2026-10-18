@@ -6,6 +6,7 @@ import { PostFX } from './post.js';
 import { settings, saveSettings, REALISTIC, q, QUALITY } from './settings.js';
 import { LightPool } from './lights.js';
 import { Torch } from './torch.js';
+import { Multiplayer } from './net.js';
 import { waveHeight } from './water.js';
 import { Sky } from './sky.js';
 import { buildWater } from './water.js';
@@ -23,9 +24,14 @@ import { Save } from './save.js';
 
 const canvas = document.getElementById('game');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(devicePixelRatio, q().dpr));
+// dynamic resolution: drops a little when frames are slow, comes back when there's headroom
+let resScale = 1;
+const pixelRatio = () => Math.min(devicePixelRatio, q().dpr) * resScale;
+renderer.setPixelRatio(pixelRatio());
 renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
+// the sun's shadow map is redrawn every frame on High, every other frame otherwise
+renderer.shadowMap.autoUpdate = false;
 renderer.shadowMap.type = REALISTIC ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = REALISTIC ? THREE.ACESFilmicToneMapping : THREE.NoToneMapping;
@@ -137,25 +143,34 @@ async function boot() {
 
   if (input.isTouch) ui.showTouch(input);
   ui.hud(true);
+  // other players (artifact room, relay or other tabs)
+  const net = new Multiplayer(game);
+  game.net = net;
+  game.updaters.push((dt) => net.update(dt));
 
   let last = performance.now();
   let saveT = 0;
-  // adaptive quality: step down when frames are slow
-  let perfT = 0, perfN = 0, slowStreak = 0;
+  // adaptive quality: lower the resolution a little first, step the preset down if that isn't enough
+  let perfT = 0, perfN = 0, slowStreak = 0, fastStreak = 0;
   function frame(now) {
     const rawDt = (now - last) / 1000;
     const dt = Math.min(0.05, rawDt);
     last = now;
     perfT += rawDt; perfN++;
-    if (perfT > 3) {
+    if (perfT > 1.5) {
       const fps = perfN / perfT;
-      slowStreak = fps < 34 ? slowStreak + 1 : 0;
-      if (slowStreak >= 2 && settings.autoQuality && settings.quality !== 'low') {
-        applyQuality(settings.quality === 'high' ? 'medium' : 'low');
-        ui.toast(`Graphics set to ${settings.quality} for smoother play (change it in Settings)`);
-        slowStreak = 0;
-      }
       perfT = 0; perfN = 0;
+      if (settings.autoQuality && !document.hidden) {
+        fastStreak = fps > 55 ? fastStreak + 1 : 0;
+        if (fps < 42 && resScale > 0.6) setResScale(resScale - 0.1);
+        else if (fastStreak >= 3 && resScale < 1) { setResScale(resScale + 0.1); fastStreak = 0; }
+        slowStreak = fps < 34 && resScale <= 0.61 ? slowStreak + 1 : 0;
+        if (slowStreak >= 3 && settings.quality !== 'low') {
+          applyQuality(settings.quality === 'high' ? 'medium' : 'low');
+          ui.toast(`Graphics set to ${settings.quality} for smoother play (change it in Settings)`);
+          slowStreak = 0;
+        }
+      }
     }
     game.time += dt;
     globalUniforms.uTime.value = game.time;
@@ -201,10 +216,17 @@ async function boot() {
     camera.lookAt(tgt.clone().addScaledVector(side, ui.creatorState && innerWidth > 700 ? 0.9 : 0).addScaledVector(up, head ? 0 : 0.35));
   }
 
+  function setResScale(v) {
+    resScale = Math.min(1, Math.max(0.6, Math.round(v * 10) / 10));
+    renderer.setPixelRatio(pixelRatio());
+    resize();
+  }
+
   function applyQuality(name) {
     settings.quality = name;
     saveSettings();
-    renderer.setPixelRatio(Math.min(devicePixelRatio, q().dpr));
+    resScale = 1;
+    renderer.setPixelRatio(pixelRatio());
     const sm = q().shadow;
     sky.sun.shadow.mapSize.set(sm, sm);
     if (sky.sun.shadow.map) { sky.sun.shadow.map.dispose(); sky.sun.shadow.map = null; }
@@ -213,7 +235,9 @@ async function boot() {
   game.applyQuality = applyQuality;
 
   const _cd = new THREE.Vector3();
+  let frameNo = 0;
   function renderFrame(dt, still) {
+    renderer.shadowMap.needsUpdate = still || ++frameNo % q().shadowEvery === 0;
     const up = player.up;
     // stable east/north in the player's frame (based on world axis)
     tangentBasis(up, east, north);
@@ -222,11 +246,12 @@ async function boot() {
       inSnow: world.biomeHere === 'snow',
     });
     sky.updateEnv(renderer, dt);
-    water.update();
+    water.update(camera.position);
     lights.update(dt, game);
     torch.update(still ? 0 : dt, game);
     setNight(sky.night);
     world.scatter.update(camera.position, q().viewDist);
+    terrain.userData.update(camera.position);
     grass.update(camera.position, q().grassDist);
     camera.updateMatrixWorld();
     globalUniforms.uPlayerView.value.copy(player.pos).addScaledVector(player.up, 1.0).applyMatrix4(camera.matrixWorldInverse);

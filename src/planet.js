@@ -234,7 +234,21 @@ export function tangentBasis(d, t1, t2) {
   t2.crossVectors(d, t1).normalize();
 }
 
+/**
+ * Could anything at unit direction `dir`, reaching up to radius `top` and spread over `ang` radians, be seen
+ * over the planet's curve from `eye`? Conservative: the occluder is a sphere a little below sea level.
+ */
+export function overHorizon(eye, dir, top = R + 4, ang = 0) {
+  const occ = R - 2.5;
+  const e = eye.length();
+  if (e <= occ + 0.5) return true;
+  const hor = Math.acos(occ / e) + Math.acos(occ / Math.max(top, occ));
+  const a = Math.acos(THREE.MathUtils.clamp(eye.dot(dir) / e, -1, 1));
+  return a - ang < hor;
+}
+
 // ---------------------------------------------------------------- terrain mesh
+const TILES = 5;
 export function buildTerrain(material, res = 150) {
   const faces = [
     [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, -1), new THREE.Vector3(0, 1, 0)],
@@ -277,37 +291,59 @@ export function buildTerrain(material, res = 150) {
         k++;
       }
     }
-    const idx = new Uint32Array(res * res * 6);
-    let q = 0;
-    for (let j = 0; j < res; j++) {
-      for (let i = 0; i < res; i++) {
-        const a = j * (res + 1) + i, b = a + 1, c = a + res + 1, e2 = c + 1;
-        idx[q++] = a; idx[q++] = b; idx[q++] = e2;
-        idx[q++] = a; idx[q++] = e2; idx[q++] = c;
+    // shared vertex buffers for the face; the face is cut into TILES x TILES meshes so the parts off screen
+    // or round the back of the planet are skipped
+    const attrs = {
+      position: new THREE.BufferAttribute(pos, 3), normal: new THREE.BufferAttribute(nor, 3),
+      color: new THREE.BufferAttribute(colr, 3), surfA: new THREE.BufferAttribute(surfA, 3), surfB: new THREE.BufferAttribute(surfB, 2),
+    };
+    // the cube-sphere face may be wound inward depending on axes: check one triangle
+    const v = (n, out) => out.fromArray(pos, n * 3);
+    const pa = v(0, new THREE.Vector3()), pb = v(1, new THREE.Vector3()), pc = v(res + 2, new THREE.Vector3());
+    const flip = new THREE.Vector3().crossVectors(pb.clone().sub(pa), pc.clone().sub(pa)).dot(pa) < 0;
+    const step = Math.ceil(res / TILES);
+    for (let tj = 0; tj < res; tj += step) {
+      for (let ti = 0; ti < res; ti += step) {
+        const j1 = Math.min(res, tj + step), i1 = Math.min(res, ti + step);
+        const idx = new Uint32Array((j1 - tj) * (i1 - ti) * 6);
+        const box = new THREE.Box3();
+        let q = 0;
+        for (let j = tj; j < j1; j++) {
+          for (let i = ti; i < i1; i++) {
+            const a = j * (res + 1) + i, b = a + 1, c = a + res + 1, e2 = c + 1;
+            if (flip) { idx[q++] = a; idx[q++] = e2; idx[q++] = b; idx[q++] = a; idx[q++] = c; idx[q++] = e2; }
+            else { idx[q++] = a; idx[q++] = b; idx[q++] = e2; idx[q++] = a; idx[q++] = e2; idx[q++] = c; }
+          }
+        }
+        const tdir = new THREE.Vector3();
+        let top = 0;
+        for (let j = tj; j <= j1; j++) {
+          for (let i = ti; i <= i1; i++) {
+            v(j * (res + 1) + i, d);
+            box.expandByPoint(d);
+            top = Math.max(top, d.length());
+            tdir.add(d);
+          }
+        }
+        const g = new THREE.BufferGeometry();
+        for (const [name, at] of Object.entries(attrs)) g.setAttribute(name, at);
+        g.setIndex(new THREE.BufferAttribute(idx, 1));
+        // shared buffers: the bounds have to come from this tile's own vertices
+        g.boundingBox = box;
+        g.boundingSphere = box.getBoundingSphere(new THREE.Sphere());
+        const mesh = new THREE.Mesh(g, material);
+        mesh.receiveShadow = true;
+        tdir.normalize();
+        let ang = 0;
+        for (const [j, i] of [[tj, ti], [tj, i1], [j1, ti], [j1, i1]]) ang = Math.max(ang, tdir.angleTo(v(j * (res + 1) + i, d)));
+        mesh.userData = { dir: tdir, ang, top };
+        group.add(mesh);
       }
     }
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    g.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
-    g.setAttribute('color', new THREE.BufferAttribute(colr, 3));
-    g.setAttribute('surfA', new THREE.BufferAttribute(surfA, 3));
-    g.setAttribute('surfB', new THREE.BufferAttribute(surfB, 2));
-    g.setIndex(new THREE.BufferAttribute(idx, 1));
-    // ensure outward winding
-    g.computeBoundingSphere();
-    const mesh = new THREE.Mesh(g, material);
-    mesh.receiveShadow = true;
-    // the cube-sphere face may be wound inward depending on axes, fix by checking a triangle
-    const pa = new THREE.Vector3().fromBufferAttribute(g.attributes.position, idx[0]);
-    const pb = new THREE.Vector3().fromBufferAttribute(g.attributes.position, idx[1]);
-    const pc = new THREE.Vector3().fromBufferAttribute(g.attributes.position, idx[2]);
-    const fn = new THREE.Vector3().crossVectors(pb.clone().sub(pa), pc.clone().sub(pa));
-    if (fn.dot(pa) < 0) {
-      for (let t = 0; t < idx.length; t += 3) { const s = idx[t + 1]; idx[t + 1] = idx[t + 2]; idx[t + 2] = s; }
-      g.index.needsUpdate = true;
-    }
-    group.add(mesh);
   }
+  group.userData.update = (eye) => {
+    for (const m of group.children) m.visible = overHorizon(eye, m.userData.dir, m.userData.top, m.userData.ang);
+  };
   return group;
 }
 

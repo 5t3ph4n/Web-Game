@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { R, sample, regionById, tangentBasis } from './planet.js';
+import { R, sample, regionById, tangentBasis, overHorizon } from './planet.js';
 import { makeCharacter, makeAnimal, ANIMAL_HEIGHT } from './character.js';
 import { orient, tangent } from './player.js';
 import { resolve } from './collision.js';
@@ -289,17 +289,28 @@ export async function buildPeople(game, fx) {
     }
   }
 
+  // skinned meshes skip three's own culling (their bind-pose bounds are wrong), so cull them here
+  const _frustum = new THREE.Frustum(), _pm = new THREE.Matrix4(), _sph = new THREE.Sphere(), _dir = new THREE.Vector3();
+  function inView(pos, d2, max) {
+    if (d2 > max * max) return false;
+    _sph.center.copy(pos).addScaledVector(_dir.copy(pos).normalize(), 1);
+    _sph.radius = 4;
+    return _frustum.intersectsSphere(_sph) && overHorizon(game.camera.position, _dir, pos.length() + 3);
+  }
+
   function update(dt) {
-    const p = game.player, pp = p.pos;
+    const p = game.player, pp = p.pos, cam = game.camera;
+    _pm.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+    _frustum.setFromProjectionMatrix(_pm);
     for (const n of npcs) {
       const d2 = n.pos.distanceToSquared(pp);
-      n.anim.root.visible = d2 < 110 * 110;
+      n.anim.root.visible = inView(n.pos, d2, 110);
       if (d2 < 90 * 90) n.update(dt, game, rand); else n.near = Infinity;
       if (d2 < 9) bodyBlock(n, dt);
     }
     for (const c of critters) {
       const d2 = c.pos.distanceToSquared(pp);
-      c.anim.root.visible = d2 < 65 * 65;
+      c.anim.root.visible = inView(c.pos, d2, 65);
       if (d2 < 65 * 65) c.update(dt, game, rand);
       if (d2 < 9 && c.bodyR > 0) bodyBlock(c, dt);
     }

@@ -82,6 +82,32 @@ scarf simulated as cloth). Your look is saved with your game.
 - **Movement**: momentum and drag, sliding on very steep slopes, heavy landings that squash and shake the
   camera, and a rowboat that pitches and rolls with the swell.
 
+## Playing together
+
+Everyone who has the game open sees everyone else: their character (with their look and name), where they
+walk, swim, glide or sit, and their torch at night. A counter under the clock shows how many other explorers
+are around, and a toast says hello when someone new arrives. How players find each other:
+
+- **As a published claude.ai artifact**, everyone who opens the shared link joins the same world (artifact
+  room presence). Names come from the name you type in the character creator, or the viewer's profile name.
+- **Self-hosted**: run the small relay (`npm run relay`, port 8787) and open the game with
+  `?relay=ws://your-host:8787`, or build with `VITE_RELAY=wss://your-host` so it's always used.
+- **Otherwise** tabs in the same browser see each other, which is handy for trying it out.
+
+Each player sends a small, absolute state about ten times a second (less when standing still); others smooth
+and slightly extrapolate it. Everything received is validated before it's used (`src/net.js`).
+
+## Performance
+
+- Terrain and the sea are split into tiles that are skipped when they're behind the planet's horizon.
+- Trees, rocks, houses and other scattered props are drawn as one instanced batch per model part, re-packed
+  every few hundred milliseconds with only the instances that are in range and above the horizon. Small
+  props (flowers, pebbles) use a shorter range and don't cast shadows.
+- The shadow map refreshes every other frame on Low/Medium. Characters and animals off screen or over the
+  horizon don't animate.
+- With *Lower quality automatically* on, the game first lowers the render resolution in small steps (and
+  raises it again when there's headroom), and only drops the quality preset if that's not enough.
+
 ## What's on the planet
 
 A spherical world (radius 100 m — several times larger than Messenger's) with 16 places to discover:
@@ -102,7 +128,8 @@ music and sound effects. Progress is saved in your browser.
 
 ## How it's made
 
-- [three.js](https://threejs.org) + [Vite](https://vitejs.dev), no other runtime dependencies.
+- [three.js](https://threejs.org) + [Vite](https://vitejs.dev), no other runtime dependencies (the optional
+  multiplayer relay uses [ws](https://github.com/websockets/ws)).
 - **Planet**: cube-sphere terrain generated from simplex noise, region "cones", terracing, land-bridge paths
   and flattened plazas (`src/planet.js`).
 - **Look**: a material factory (`src/toon.js`) that builds PBR or cel materials depending on the art style,

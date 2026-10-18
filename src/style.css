@@ -58,6 +58,8 @@ body { font-family: var(--round); color: var(--ink); -webkit-user-select: none; 
 .hud { position: absolute; inset: 0; }
 .hud-left { position: absolute; left: calc(16px + var(--sal)); top: calc(14px + var(--sat)); max-width: calc(100vw - 320px); }
 .here { font-family: var(--pixel); font-size: 16px; color: #fff; text-shadow: 2px 2px 0 var(--ink); }
+.players { position: absolute; left: calc(16px + var(--sal)); top: calc(62px + var(--sat)); font-weight: 800; font-size: 13px; color: #fff; text-shadow: 1px 1px 0 var(--ink), -1px 1px 0 var(--ink), 1px -1px 0 var(--ink), -1px -1px 0 var(--ink); }
+.players.hidden { display: none; }
 .hud-right { position: absolute; right: calc(12px + var(--sar)); top: calc(12px + var(--sat)); display: flex; gap: 8px; align-items: center; }
 .hb { width: 42px; height: 42px; font-size: 18px; padding: 0; }
 .stars { display: flex; align-items: center; gap: 6px; background: var(--paper); border: 3px solid var(--ink); border-radius: 12px; box-shadow: var(--shadow); padding: 4px 12px; height: 42px; font-weight: 800; }
@@ -98,6 +100,9 @@ body.photo .photo-exit { display: block; }
 .is-touch .prompt { pointer-events: auto; cursor: pointer; padding: 6px 14px 6px 6px; }
 .is-touch .prompt .key { background: transparent; font-size: 20px; font-family: var(--round); }
 .bubble { background: #fff; border: 3px solid var(--ink); border-radius: 14px; padding: 5px 12px; font-weight: 800; font-size: 14px; white-space: nowrap; box-shadow: 0 3px 0 var(--ink); animation: bubbleIn .25s ease; }
+.ptags { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.ptag { position: absolute; left: 0; top: 0; will-change: transform; background: rgba(43, 38, 58, .72); color: #fff; border-radius: 10px; padding: 2px 9px; font-weight: 800; font-size: 13px; white-space: nowrap; }
+body.photo .ptags { display: none; }
 .bubble::after { content: ''; position: absolute; left: 50%; bottom: -10px; width: 12px; height: 12px; background: #fff; border-right: 3px solid var(--ink); border-bottom: 3px solid var(--ink); transform: translateX(-50%) rotate(45deg); }
 @keyframes bubbleIn { from { opacity: 0; margin-top: 8px; } }
 
@@ -184,6 +189,7 @@ body.modal .touch { opacity: 0; visibility: hidden; }
 @media (max-width: 480px) {
   .hud-left { top: calc(58px + var(--sat)); max-width: 70vw; }
   .clock { top: calc(78px + var(--sat)); }
+  .players { top: calc(100px + var(--sat)); }
   .is-touch .toasts { top: calc(104px + var(--sat)); }
 }
 @media (max-width: 560px) {

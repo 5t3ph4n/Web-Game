@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { toonify } from './toon.js';
-import { R, sample } from './planet.js';
+import { R, sample, overHorizon } from './planet.js';
 
 const loader = new GLTFLoader();
 const BASE = import.meta.env.BASE_URL + 'assets/';
@@ -179,61 +179,80 @@ export function surfaceMatrix(dir, { yaw = 0, scale = 1, lift = 0, height } = {}
   return out.compose(_p, _q, _s);
 }
 
-// ------------------------------------------------------------------ chunked instancing
-const CH = 3; // grid per cube face
-function chunkKey(d) {
-  const ax = Math.abs(d.x), ay = Math.abs(d.y), az = Math.abs(d.z);
-  let f, u, v;
-  if (ax >= ay && ax >= az) { f = d.x > 0 ? 0 : 1; u = d.y / ax; v = d.z / ax; }
-  else if (ay >= az) { f = d.y > 0 ? 2 : 3; u = d.x / ay; v = d.z / ay; }
-  else { f = d.z > 0 ? 4 : 5; u = d.x / az; v = d.y / az; }
-  const iu = Math.min(CH - 1, Math.floor(((u + 1) / 2) * CH));
-  const iv = Math.min(CH - 1, Math.floor(((v + 1) / 2) * CH));
-  return f * 100 + iu * 10 + iv;
-}
-
+// ------------------------------------------------------------------ instancing with per-instance culling
+/**
+ * Static props share one InstancedMesh per model part for the whole planet (one draw call each). A few times a
+ * second the instances that are in range and over the horizon are packed to the front of the buffer, so far
+ * away and hidden ones cost nothing; small props (flowers, pebbles) get a shorter range and cast no shadow.
+ */
 export class Scatter {
   constructor() {
-    this.items = new Map(); // key -> Map(path -> {matrices, shadow})
-    this.chunks = [];
+    this.items = new Map(); // id -> {path, shadow, mats}
+    this.sets = [];
     this.group = new THREE.Group();
+    this.last = new THREE.Vector3(1e9, 0, 0);
+    this.lastT = 0;
   }
   add(path, matrix, { shadow = true } = {}) {
-    _p.setFromMatrixPosition(matrix).normalize();
-    const key = chunkKey(_p);
-    if (!this.items.has(key)) this.items.set(key, new Map());
-    const m = this.items.get(key);
     const id = path + (shadow ? '' : '#ns');
-    if (!m.has(id)) m.set(id, { path, shadow, mats: [] });
-    m.get(id).mats.push(matrix.clone());
+    if (!this.items.has(id)) this.items.set(id, { path, shadow, mats: [] });
+    this.items.get(id).mats.push(matrix.clone());
   }
   build() {
-    for (const [, byPath] of this.items) {
-      const g = new THREE.Group();
-      const center = new THREE.Vector3();
-      let n = 0;
-      for (const [, { path, shadow, mats }] of byPath) {
-        const model = getModel(path);
-        for (const part of model.parts) {
-          const im = new THREE.InstancedMesh(part.geometry, part.material, mats.length);
-          for (let i = 0; i < mats.length; i++) {
-            im.setMatrixAt(i, mats[i]);
-            if (part === model.parts[0]) { center.add(_p.setFromMatrixPosition(mats[i])); n++; }
-          }
-          im.castShadow = shadow; im.receiveShadow = true;
-          im.computeBoundingSphere();
-          g.add(im);
-        }
+    for (const [, { path, shadow, mats }] of this.items) {
+      const model = getModel(path);
+      const rad = model.size.length() / 2;
+      const n = mats.length;
+      const dirs = new Float32Array(n * 3), tops = new Float32Array(n), dists = new Float32Array(n);
+      let sc = 0;
+      for (let i = 0; i < n; i++) {
+        _p.setFromMatrixPosition(mats[i]);
+        const s = mats[i].getMaxScaleOnAxis();
+        sc = Math.max(sc, s);
+        tops[i] = _p.length() + rad * 2 * s;
+        _p.normalize().toArray(dirs, i * 3);
       }
-      center.divideScalar(Math.max(n, 1));
-      g.userData.center = center;
-      this.chunks.push(g);
-      this.group.add(g);
+      const small = rad * sc < 0.6;
+      const ims = model.parts.map((part) => {
+        const im = new THREE.InstancedMesh(part.geometry, part.material, n);
+        im.castShadow = shadow && !small; im.receiveShadow = true;
+        im.count = 0;
+        this.group.add(im);
+        return im;
+      });
+      this.sets.push({ mats, dirs, tops, dists, small, ims, n });
     }
     return this.group;
   }
   update(cameraPos, viewDist = 120) {
-    const vd2 = viewDist * viewDist;
-    for (const c of this.chunks) c.visible = c.userData.center.distanceToSquared(cameraPos) < vd2;
+    // re-pack only after moving a bit, or now and then for camera turns around the player
+    const now = performance.now();
+    if (this.last.distanceToSquared(cameraPos) < 2.25 && now - this.lastT < 400) return;
+    this.last.copy(cameraPos);
+    this.lastT = now;
+    const vd = viewDist, sd = viewDist * 0.55;
+    for (const set of this.sets) {
+      const { mats, dirs, tops, small, ims, n } = set;
+      const max = small ? sd : vd;
+      let count = 0;
+      for (let i = 0; i < n; i++) {
+        const e = mats[i].elements;
+        const dx = e[12] - cameraPos.x, dy = e[13] - cameraPos.y, dz = e[14] - cameraPos.z;
+        if (dx * dx + dy * dy + dz * dz > max * max) continue;
+        _p.fromArray(dirs, i * 3);
+        if (!overHorizon(cameraPos, _p, tops[i])) continue;
+        for (const im of ims) im.instanceMatrix.array.set(e, count * 16);
+        count++;
+      }
+      for (const im of ims) {
+        im.count = count;
+        im.visible = count > 0;
+        if (!count) continue;
+        im.instanceMatrix.clearUpdateRanges();
+        im.instanceMatrix.addUpdateRange(0, count * 16);
+        im.instanceMatrix.needsUpdate = true;
+        im.computeBoundingSphere();
+      }
+    }
   }
 }

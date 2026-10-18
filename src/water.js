@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { R, sample } from './planet.js';
+import { R, sample, overHorizon } from './planet.js';
 import { globalUniforms } from './toon.js';
 import { REALISTIC } from './settings.js';
 
@@ -140,15 +140,50 @@ export function buildWater(sky) {
     side: THREE.DoubleSide,
     depthWrite: true,
   });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.receiveShadow = true;
-  mesh.renderOrder = 1;
-  mesh.update = () => {
+  // Cut the sphere into tiles that can be culled (off screen, round the back of the planet), and leave out the
+  // triangles buried under dry land, which can never be seen.
+  const group = new THREE.Group();
+  const WS = 360, HS = 180, TW = 45, TH = 30;
+  const v = new THREE.Vector3();
+  for (let ty = 0; ty < HS; ty += TH) {
+    for (let tx = 0; tx < WS; tx += TW) {
+      const tris = [];
+      const box = new THREE.Box3();
+      const tdir = new THREE.Vector3();
+      for (let y = ty; y < ty + TH; y++) {
+        for (let x = tx; x < tx + TW; x++) {
+          // SphereGeometry writes (up to) two triangles per grid cell, in row order; the pole rows have one
+          const a = y * (WS + 1) + x + 1, b = y * (WS + 1) + x, c = (y + 1) * (WS + 1) + x, e = (y + 1) * (WS + 1) + x + 1;
+          for (const t of y === 0 ? [[b, c, e]] : y === HS - 1 ? [[a, b, e]] : [[a, b, e], [b, c, e]]) {
+            if (depth[t[0]] > 1.2 && depth[t[1]] > 1.2 && depth[t[2]] > 1.2) continue;
+            tris.push(...t);
+            for (const k of t) { v.fromBufferAttribute(pos, k); box.expandByPoint(v); tdir.add(v); }
+          }
+        }
+      }
+      if (!tris.length) continue;
+      const g = new THREE.BufferGeometry();
+      for (const name of ['position', 'normal', 'uv', 'depth']) g.setAttribute(name, geo.attributes[name]);
+      g.setIndex(tris);
+      g.boundingBox = box;
+      g.boundingSphere = box.getBoundingSphere(new THREE.Sphere());
+      const m = new THREE.Mesh(g, mat);
+      m.receiveShadow = true;
+      m.renderOrder = 1;
+      tdir.normalize();
+      let ang = 0;
+      for (let i = 0; i < tris.length; i += 3) ang = Math.max(ang, tdir.angleTo(v.fromBufferAttribute(pos, tris[i])));
+      m.userData = { dir: tdir, ang };
+      group.add(m);
+    }
+  }
+  group.update = (eye) => {
     mat.uniforms.uSunDir.value.copy(sky.sunDir);
     mat.uniforms.uSunCol.value.copy(sky.sun.color);
     mat.uniforms.uNight.value = sky.night;
     mat.uniforms.uSky.value.copy(sky.skyHorizon);
     mat.uniforms.uSkyTop.value.copy(sky.skyTop);
+    if (eye) for (const m of group.children) m.visible = overHorizon(eye, m.userData.dir, R + 0.5, m.userData.ang);
   };
-  return mesh;
+  return group;
 }
