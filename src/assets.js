@@ -61,6 +61,92 @@ export function getModel(path) {
   return m;
 }
 
+// ------------------------------------------------------------------ collision shapes from meshes
+const hfCache = new Map();
+const clampI = (v, a, b) => (v < a ? a : v > b ? b : v);
+
+/**
+ * Collision heightfield of a model, in model units: for each cell of a grid over its footprint, the highest
+ * surface (`top`) and the lowest (`bot`). Cells are ~25cm at the given scale. Built from the actual triangles
+ * (vertices, points along every edge, and cell centres inside each triangle) so walls, eaves, porches, thin
+ * posts and offset geometry all land where you can see them.
+ */
+export function getHeightfield(path, scale = 1) {
+  const m = getModel(path);
+  const nx = clampI(Math.round((m.size.x * scale) / 0.25), 1, 64);
+  const nz = clampI(Math.round((m.size.z * scale) / 0.25), 1, 64);
+  const key = path + '|' + nx + '|' + nz;
+  if (hfCache.has(key)) return hfCache.get(key);
+  const minX = m.box.min.x, minZ = m.box.min.z;
+  const sx = m.size.x / nx || 1, sz = m.size.z / nz || 1;
+  const top = new Float32Array(nx * nz).fill(-Infinity);
+  const bot = new Float32Array(nx * nz).fill(Infinity);
+  const mark = (x, y, z) => {
+    const k = clampI(Math.floor((z - minZ) / sz), 0, nz - 1) * nx + clampI(Math.floor((x - minX) / sx), 0, nx - 1);
+    if (y > top[k]) top[k] = y;
+    if (y < bot[k]) bot[k] = y;
+  };
+  const sp = Math.min(sx, sz) * 0.5;
+  for (const part of m.parts) {
+    const a = part.geometry.attributes.position.array;
+    for (let t = 0; t + 8 < a.length; t += 9) {
+      const ax = a[t], ay = a[t + 1], az = a[t + 2], bx = a[t + 3], by = a[t + 4], bz = a[t + 5], cx = a[t + 6], cy = a[t + 7], cz = a[t + 8];
+      // along the edges (catches walls, posts and rails thinner than a cell)
+      for (const [x0, y0, z0, x1, y1, z1] of [[ax, ay, az, bx, by, bz], [bx, by, bz, cx, cy, cz], [cx, cy, cz, ax, ay, az]]) {
+        const n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, z1 - z0) / sp));
+        for (let i = 0; i <= n; i++) { const f = i / n; mark(x0 + (x1 - x0) * f, y0 + (y1 - y0) * f, z0 + (z1 - z0) * f); }
+      }
+      // cell centres covered by the triangle (roofs, floors, big flat faces)
+      const den = (bx - ax) * (cz - az) - (cx - ax) * (bz - az);
+      if (Math.abs(den) < 1e-10) continue;
+      const i0 = clampI(Math.floor((Math.min(ax, bx, cx) - minX) / sx), 0, nx - 1), i1 = clampI(Math.floor((Math.max(ax, bx, cx) - minX) / sx), 0, nx - 1);
+      const j0 = clampI(Math.floor((Math.min(az, bz, cz) - minZ) / sz), 0, nz - 1), j1 = clampI(Math.floor((Math.max(az, bz, cz) - minZ) / sz), 0, nz - 1);
+      for (let j = j0; j <= j1; j++) {
+        const pz = minZ + (j + 0.5) * sz;
+        for (let i = i0; i <= i1; i++) {
+          const px = minX + (i + 0.5) * sx;
+          const u = ((bx - px) * (cz - pz) - (cx - px) * (bz - pz)) / den;
+          const v = ((cx - px) * (az - pz) - (ax - px) * (cz - pz)) / den;
+          if (u < 0 || v < 0 || u + v > 1) continue;
+          mark(px, u * ay + v * by + (1 - u - v) * cy, pz);
+        }
+      }
+    }
+  }
+  const hf = { nx, nz, sx, sz, minX, minZ, top, bot };
+  hfCache.set(key, hf);
+  return hf;
+}
+
+/** Trunk radius of a tree-like model (widest point in the bottom 5% of its height), in model units. */
+export function trunkRadius(path) {
+  const m = getModel(path);
+  if (m.trunk === undefined) {
+    let r = 0;
+    const lim = m.box.min.y + m.size.y * 0.05;
+    for (const part of m.parts) {
+      const a = part.geometry.attributes.position.array;
+      for (let i = 0; i < a.length; i += 3) if (a[i + 1] <= lim) r = Math.max(r, Math.hypot(a[i], a[i + 2]));
+    }
+    m.trunk = r || m.size.x * 0.15;
+  }
+  return m.trunk;
+}
+
+/** A heightfield collider for a model placed like surfaceMatrix(up, { yaw, scale }) with its origin at `pos`. */
+export function modelCollider(path, pos, up, { yaw = 0, scale = 1, ...extra } = {}) {
+  const m = getModel(path);
+  const q = surfaceQuat(up, yaw);
+  return {
+    shape: 'hf', pos, up: up.clone().normalize(), hf: getHeightfield(path, scale), s: scale,
+    ax: new THREE.Vector3(1, 0, 0).applyQuaternion(q), az: new THREE.Vector3(0, 0, 1).applyQuaternion(q),
+    hx: (m.size.x * scale) / 2, hz: (m.size.z * scale) / 2,
+    cx: ((m.box.min.x + m.box.max.x) / 2) * scale, cz: ((m.box.min.z + m.box.max.z) / 2) * scale,
+    y0: m.box.min.y * scale, y1: m.box.max.y * scale,
+    ...extra,
+  };
+}
+
 /** Create a normal (non-instanced) toon Object3D for a preloaded model. */
 export function makeObject(path, { shadow = true } = {}) {
   const m = getModel(path);

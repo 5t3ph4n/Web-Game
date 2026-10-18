@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { R, sample, normalAt } from './planet.js';
-import { resolve } from './collision.js';
+import { resolve, STEP } from './collision.js';
 import { toonMaterial, globalUniforms } from './toon.js';
 import { waveHeight } from './water.js';
 import { Cloth } from './character.js';
@@ -9,7 +9,11 @@ const _m = new THREE.Matrix4();
 const _right = new THREE.Vector3();
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
+const _up = new THREE.Vector3();
 const _n = new THREE.Vector3();
+
+const AIR_STEP = 1.0; // how far below a ledge you can be mid-jump and still pull yourself up onto it
+const SWIM_STEP = 1.2; // climb out of the water onto anything up to ~25cm above the surface (lily pads, boats)
 
 /** Orient an object so +Y = up and +Z = forward. */
 export function orient(obj, up, forward) {
@@ -55,7 +59,10 @@ export class Player {
     this.speed = 0;
     this.stepT = 0;
     this.coyote = 0;
+    this.jumpBuf = 0;
+    this.lastFloorC = null;
     this.airTime = 0;
+    this.bounce = 0;
     this.radius = 0.45;
     this.frozen = false;
     this.touching = null;
@@ -63,8 +70,8 @@ export class Player {
     this.swimT = 0;
     this.swimLean = 0;
     this.landSquash = 0;
-    this.fallStart = 0;
-    this.events = []; // gameplay events for fx/ui: splash, land, outOfBreath...
+    this.depth = 0;
+    this.events = []; // gameplay events for fx/ui: splash, bubble, hardLand, outOfBreath...
 
     // little parasol glider
     const g = new THREE.Group();
@@ -96,7 +103,7 @@ export class Player {
         : { w: 3, h: 7, width: 0.16, length: 0.7 });
       this.clothKind = look.back;
     }
-    this.sync();
+    if (this.pos) this.sync();
   }
 
   place(dir, facing) {
@@ -142,7 +149,8 @@ export class Player {
     const sp0 = this.vel.length();
     if (sp0 > 1e-5) tangent(this.vel, up).multiplyScalar(sp0); else this.vel.set(0, 0, 0);
 
-    const accel = water ? 9 : this.onGround ? 40 : 10;
+    // momentum: snappy on the ground, floaty in water, a little air control
+    const accel = water ? 9 : this.onGround ? 40 : 14;
     if (mag > 0.05) {
       want.normalize().multiplyScalar(maxSpeed * mag);
       this.vel.lerp(want, Math.min(1, (accel * dt) / Math.max(maxSpeed, 1)));
@@ -150,31 +158,30 @@ export class Player {
       this.facing.lerp(tgt, Math.min(1, dt * (water ? 4 : 12)));
       tangent(this.facing, up);
     } else {
-      // friction on land, drag in water, little air control
-      this.vel.multiplyScalar(Math.max(0, 1 - dt * (water ? 1.6 : this.onGround ? 14 : 0.6)));
+      this.vel.multiplyScalar(Math.max(0, 1 - dt * (water ? 1.6 : this.onGround ? 14 : 1)));
     }
 
-    // ground info under us
-    const curH = sample(up);
-
-    // sliding down very steep slopes
-    if (this.onGround && !water) {
+    // very steep ground makes you slide downhill
+    this.sliding = false;
+    if (this.onGround && !water && !this.floorC) {
       normalAt(up, _n);
       const steep = _n.dot(up);
       if (steep < 0.62) {
         const down = _v.copy(_n).addScaledVector(up, -_n.dot(up));
         this.vel.addScaledVector(down, (0.62 - steep) * 60 * dt);
         this.sliding = true;
-      } else this.sliding = false;
+      }
     }
     this.speed = this.vel.length();
 
-    // jumping / gliding / swimming up
+    // jumping / gliding (a press just before landing still counts)
     if (this.onGround) this.coyote = 0.12; else this.coyote -= dt;
-    if (input.hit('Space') && this.coyote > 0 && !water) {
+    this.jumpBuf = input.hit('Space') ? 0.15 : this.jumpBuf - dt;
+    if (this.jumpBuf > 0 && this.coyote > 0 && !water) {
       this.vUp = 8.6;
       this.onGround = false;
       this.coyote = 0;
+      this.jumpBuf = 0;
       this.anim.play('jump', 0.08, { once: true, timeScale: 1.4 });
       this.audio && this.audio.jump();
     }
@@ -182,53 +189,39 @@ export class Player {
     if (gliding) this.mode = 'glide'; else if (this.mode === 'glide') this.mode = 'walk';
     this.parasol.visible = gliding;
 
-    // integrate tangential motion (move along the sphere)
-    const step = _v.copy(this.vel).multiplyScalar(dt);
-    if (step.lengthSq() > 0) {
-      const newPos = _v2.copy(this.pos).add(step);
-      const nd = newPos.clone().normalize();
-      const nh = sample(nd);
-      const rise = nh - Math.max(curH, this.feetR - R);
-      const slope = rise / Math.max(step.length(), 1e-4);
-      if ((this.onGround || water) && rise > 0.18 && slope > 2.0) {
-        this.vel.multiplyScalar(0.2); // wall of rock
-      } else {
-        const r = this.pos.length();
-        this.pos.copy(nd).multiplyScalar(r);
-      }
-    }
-
-    // collisions with props (can stand on finite-height props)
+    // integrate tangential motion (move along the sphere) in short substeps, so running can't tunnel into
+    // props, and slide along walls and cliffs instead of stopping dead
     this.touching = null;
-    const res = resolve(this.colliders, this.pos, this.radius, this.pos.length(), (c) => {
+    const onHit = (c) => {
       this.touching = c;
       if (c.onTouch) c.onTouch(this, c);
-    });
-    const floorR = res.floor;
-    this.floorC = res.floorC;
-    const ud = this.pos.clone().normalize();
-    const gh = sample(ud);
-    let groundR = R + gh;
-    if (floorR > groundR) groundR = floorR;
+    };
+    const opts = { step: water ? SWIM_STEP : STEP, vUp: this.vUp };
+    const n = Math.min(4, Math.ceil((this.vel.length() * dt) / 0.22));
+    for (let i = 0; i < n; i++) {
+      if (!this.moveStep(dt / n, water)) break;
+      const res = resolve(this.colliders, this.pos, this.radius, opts, onHit);
+      this.slide(res.push);
+    }
 
-    // ------------------------------------------------------------ water
-    const surfR = waterSurfaceR(this.pos, t, gh);
-    const deep = gh < WATER_DEPTH_SWIM && floorR < surfR - 1;
-    let r = this.pos.length();
+    const gh0 = sample(_up.copy(this.pos).normalize());
+    const surfR = waterSurfaceR(this.pos, t, gh0);
+    const deepHere = gh0 < WATER_DEPTH_SWIM;
     const wasGround = this.onGround;
     const wasWater = water;
+    const prevR = this.pos.length();
 
-    if (deep && (water || r < surfR - CHEST + 0.25)) {
-      // entering the water
+    // ------------------------------------------------------------ water
+    if (deepHere && (water || prevR < surfR - CHEST + 0.25)) {
       if (!wasWater) {
-        if (this.vUp < -4 || this.mode === 'glide') this.events.push({ type: 'splash', big: this.vUp < -10 });
-        else this.events.push({ type: 'splash', big: false });
+        this.events.push({ type: 'splash', big: this.vUp < -10 });
         this.mode = 'swim';
         this.vUp *= 0.35;
       }
       const wantDive = input.down('KeyC', 'ControlLeft', 'ControlRight', 'KeyDive');
       const wantUp = input.down('Space');
       const restR = surfR - CHEST; // treading-water feet height
+      let r = prevR;
       if (this.mode === 'swim' && wantDive && this.breath > 0.1) {
         this.mode = 'dive';
         this.vUp = -3;
@@ -242,7 +235,7 @@ export class Player {
         if (!wantDive && !wantUp) vt += 0.6; // you slowly float up
         this.vUp += (vt - this.vUp) * Math.min(1, dt * 3);
         r += this.vUp * dt;
-        const floorLimit = groundR + 0.3;
+        const floorLimit = R + gh0 + 0.3;
         if (r < floorLimit) { r = floorLimit; if (this.vUp < 0) this.vUp = 0; }
         if (r >= restR) { r = restR; this.mode = 'swim'; this.vUp = 0; this.events.push({ type: 'surface' }); }
         this.breath = Math.max(0, this.breath - dt / BREATH_TIME);
@@ -255,35 +248,68 @@ export class Player {
         r += this.vUp * dt;
         this.breath = Math.min(1, this.breath + dt / 3);
         if (this.breath > 0.3) this.outOfBreath = false;
-        // climbing out: jump when there is shallow ground ahead
-        if (wantUp && input.hit('Space')) {
-          const ahead = this.pos.clone().addScaledVector(this.facing, 1.6).normalize();
-          if (sample(ahead) > -1.0) { this.vUp = 7.5; r += 0.3; this.mode = 'walk'; this.onGround = false; this.anim.play('jump', 0.1, { once: true }); }
-          else { this.vUp = 2.5; this.events.push({ type: 'splash', big: false }); }
+        // jump out when there's shallow ground (or a pad / pier) ahead
+        if (this.jumpBuf > 0) {
+          const ahead = _v.copy(this.pos).addScaledVector(this.facing, 1.6).normalize();
+          if (sample(ahead) > -1.0 || this.touching) {
+            this.vUp = 7.5; r += 0.3; this.mode = 'walk'; this.jumpBuf = 0;
+            this.anim.play('jump', 0.1, { once: true });
+          } else { this.vUp = 2.5; this.jumpBuf = 0; this.events.push({ type: 'splash', big: false }); }
         }
       }
       this.pos.setLength(r);
-      this.onGround = false;
-      this.coyote = 0;
+      // still collide with piers, rocks and boats while swimming (and climb onto low ones)
+      opts.vUp = this.vUp; opts.prevR = prevR;
+      const res = resolve(this.colliders, this.pos, this.radius, opts, onHit);
+      this.slide(res.push);
+      if (res.ceil < this.pos.length()) { this.pos.setLength(res.ceil); if (this.vUp > 0) this.vUp = 0; }
+      if (this.mode === 'swim' && res.floor > this.pos.length() && res.floor - this.pos.length() < SWIM_STEP) {
+        // climbed onto something (lily pad, low rock)
+        this.pos.setLength(res.floor);
+        this.mode = 'walk'; this.vUp = 0; this.onGround = true; this.floorC = res.floorC;
+      } else {
+        this.onGround = false;
+        this.coyote = 0;
+      }
     } else {
-      if (wasWater) { this.mode = 'walk'; this.breath = 1; }
+      if (wasWater) { this.mode = this.mode === 'dive' || this.mode === 'swim' ? 'walk' : this.mode; this.breath = 1; }
       // gravity
       const g = gliding ? 7 : 24;
-      this.vUp -= g * dt;
+      this.vUp = Math.max(this.vUp - g * dt, -40);
       if (gliding && this.vUp < -2.2) this.vUp = -2.2;
-      r += this.vUp * dt;
-      this.pos.setLength(r);
+      this.pos.setLength(prevR + this.vUp * dt);
+
+      // collisions with props: get pushed out, stand on tops, bump your head on undersides
+      opts.vUp = this.vUp; opts.prevR = prevR;
+      const res = resolve(this.colliders, this.pos, this.radius, opts, onHit);
+      this.slide(res.push);
+      if (res.ceil < this.pos.length()) {
+        this.pos.setLength(res.ceil);
+        if (this.vUp > 0) this.vUp = 0;
+      }
+      const floorR = res.floor;
+      this.floorC = res.floorC;
+      const gh = sample(_up.copy(this.pos).normalize());
+      let groundR = R + gh;
+      if (floorR > groundR) groundR = floorR;
+      const r = this.pos.length();
       if (r <= groundR + 0.02) {
         this.pos.setLength(groundR);
         if (!wasGround) {
           const impact = -this.vUp;
           if (impact > 3) this.audio && this.audio.land();
+          if (this.bounce > 0) { this.vUp = this.bounce; this.bounce = 0; }
           if (impact > 15) { this.landSquash = Math.min(1, (impact - 15) / 12 + 0.4); this.events.push({ type: 'hardLand', impact }); this.vel.multiplyScalar(0.4); }
           else if (impact > 7) this.landSquash = 0.25;
         }
         if (this.vUp <= 0) {
           this.vUp = 0; this.onGround = true;
-          if (this.floorC && this.floorC.onLand && !wasGround) this.floorC.onLand(this, this.floorC);
+          // landing on (or walking onto) something that reacts: bouncy caps, singing stones…
+          const c = this.floorC;
+          if (c && c.onLand && (!wasGround || c !== this.lastFloorC)) {
+            const now = performance.now();
+            if (now - (c.landT || 0) > 350) { c.landT = now; c.onLand(this, c); }
+          }
         }
       } else if (r > groundR + 0.25) {
         this.onGround = false;
@@ -291,12 +317,53 @@ export class Player {
         this.pos.setLength(groundR); // stick to slopes going downhill
       }
     }
+    this.lastFloorC = this.onGround ? this.floorC : null;
     this.airTime = this.onGround || this.inWater ? 0 : this.airTime + dt;
-    this.depth = Math.max(0, surfR - (this.pos.length() + 1.5)); // head depth below surface
+    this.depth = Math.max(0, waterSurfaceR(this.pos, t, sample(_up.copy(this.pos).normalize())) - (this.pos.length() + 1.5));
 
     this.sync();
     this.animate(dt, running);
     this.updateCloth(dt);
+  }
+
+  /** Move along the surface by vel*dt. Too-steep terrain makes the velocity slide along the slope instead. */
+  moveStep(dt, swimming) {
+    const up = _up.copy(this.pos).normalize();
+    const feetH = this.feetR - R;
+    const curH = sample(up);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const step = _v.copy(this.vel).multiplyScalar(dt);
+      const len = step.length();
+      if (len < 1e-6) return false;
+      const nd = _v2.copy(this.pos).add(step).normalize();
+      const nh = sample(nd);
+      const rise = nh - Math.max(curH, feetH);
+      const tooSteep = this.onGround
+        ? rise > 0.18 && rise / len > 2.0
+        : nh > feetH + (swimming ? SWIM_STEP : AIR_STEP); // in the air you can only mantle a small ledge
+      if (!tooSteep) {
+        const r = this.pos.length();
+        this.pos.copy(nd).multiplyScalar(r);
+        return true;
+      }
+      // the slope's downhill direction acts like a wall normal
+      normalAt(nd, _n);
+      _n.addScaledVector(nd, -_n.dot(nd));
+      const vn = this.vel.dot(_n);
+      if (_n.lengthSq() < 1e-8 || vn >= 0) { this.vel.multiplyScalar(0.2); return false; }
+      _n.normalize();
+      this.vel.addScaledVector(_n, -this.vel.dot(_n));
+    }
+    return false;
+  }
+
+  /** After being pushed out of a prop, drop the part of the velocity that keeps running into it. */
+  slide(push) {
+    const l = push.length();
+    if (l < 1e-6) return;
+    _n.copy(push).divideScalar(l);
+    const vn = this.vel.dot(_n);
+    if (vn < 0) this.vel.addScaledVector(_n, -vn);
   }
 
   animate(dt, running) {
@@ -308,18 +375,16 @@ export class Player {
     // body lean: horizontal while swimming forward or diving
     const moving = this.speed > 0.6;
     const targetLean = this.mode === 'dive' ? (moving ? 1.35 : 0.9) + THREE.MathUtils.clamp(-this.vUp * 0.15, -0.5, 0.5)
-      : this.mode === 'swim' ? (moving ? 1.2 : 0.15) : this.mode === 'glide' ? 0 : 0;
+      : this.mode === 'swim' ? (moving ? 1.2 : 0.15) : 0;
     this.swimLean += (targetLean - this.swimLean) * Math.min(1, dt * 4);
     a.pose.rotation.x = this.swimLean;
     // when horizontal at the surface, lift the hips so the back is at the waterline
     a.pose.position.y = a.hip + (this.mode === 'swim' ? 0.25 + Math.sin(Math.min(this.swimLean, 1.3)) * 0.55 : 0);
-    // landing squash
     const sq = this.landSquash;
     a.pose.scale.set(1 + sq * 0.12, 1 - sq * 0.22, 1 + sq * 0.12);
 
-    if (water) {
-      a.play('idle', 0.3);
-    } else if (this.mode === 'glide') a.play('holding-both', 0.2);
+    if (water) a.play('idle', 0.3);
+    else if (this.mode === 'glide') a.play('holding-both', 0.2);
     else if (!this.onGround && this.airTime > 0.12) {
       if (this.vUp < -1 && a.currentName !== 'fall') a.play('fall', 0.25);
     } else if (this.speed > 7) { a.play('sprint', 0.15); a.setSpeed(this.speed / 9); }

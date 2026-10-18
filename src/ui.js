@@ -3,6 +3,7 @@ import { CHARACTER_SKINS, PALETTES, HATS, FACES, BACKS, LABELS, defaultLook, ran
 import { settings, saveSettings } from './settings.js';
 import { REGIONS } from './planet.js';
 import { NPCS, CRITTER_NAMES } from './content.js';
+import { IS_TOUCH } from './input.js';
 
 const $ = (html) => {
   const t = document.createElement('template');
@@ -10,11 +11,31 @@ const $ = (html) => {
   return t.content.firstElementChild;
 };
 
+// Control names in game text are written as {tokens} and shown for the device in hand: [keyboard, touch].
+const CONTROL_WORDS = {
+  'press E': ['press E', 'tap the pop-up button'],
+  'Press E': ['Press E', 'Tap the pop-up button'],
+  'SPACE': ['SPACE', 'the jump button'],
+  'Space': ['SPACE', 'The jump button'],
+  'hold SPACE': ['hold SPACE', 'hold the jump button'],
+  'Hold SPACE': ['Hold SPACE', 'Hold the jump button'],
+  'Press J': ['Press TAB or J', 'Tap the 📖 button'],
+  'run': ['run (SHIFT)', 'push the stick all the way'],
+  'row': ['Steer with A and D, row with W.', 'Push the stick to row and steer.'],
+};
+export const ctl = (text) => text.replace(/\{([^}]+)\}/g, (m, k) => (CONTROL_WORDS[k] ? CONTROL_WORDS[k][IS_TOUCH ? 1 : 0] : m));
+
+// pop-up button icons for each kind of interaction
+const ICONS = {
+  'Talk': '💬', 'Pet': '❤️', 'Pick up': '✋', 'Sit': '🪑', 'Read': '📜', 'Make a wish': '✨', 'Stand up': '⬆️', 'Hop out': '🏝️', 'Jump out': '🪂',
+};
+
 export class UI {
   constructor() {
     this.root = document.getElementById('ui');
     this.modal = false;
     this.focus = null;
+    if (IS_TOUCH) document.body.classList.add('is-touch');
     this.toasts = $('<div class="toasts"></div>');
     this.root.appendChild(this.toasts);
     this.loader = $(`<div class="loader"><div class="title-logo">WANDERER</div><div class="bar"><i></i></div><div class="msg">Loading…</div></div>`);
@@ -27,6 +48,8 @@ export class UI {
     this.place = $('<div class="place"><div class="pname"></div><div class="psub"></div><div class="pnew">NEW PLACE DISCOVERED</div></div>');
     this.root.appendChild(this.place);
     this._v = new THREE.Vector3();
+    this._v2 = new THREE.Vector3();
+    this.ctx = null;
   }
 
   loading(p, msg) {
@@ -52,7 +75,9 @@ export class UI {
             <button class="start">${returning ? 'Continue' : 'Start exploring'}</button>
             <button class="secondary create">Character creator</button>
           </div>
-          <div class="hint">WASD / Arrows to walk · SHIFT run · SPACE jump/swim up · C dive · E interact · F pick up/throw · Drag to look</div>
+          <div class="hint">${IS_TOUCH
+            ? 'Left thumb to walk · JUMP to jump (hold to glide) · DIVE to go under water · tap the pop-up buttons to talk, pet, grab & ride · drag to look · pinch to zoom'
+            : 'WASD / Arrows to walk · SHIFT run · SPACE jump/swim up · C dive · E interact · F pick up/throw · Drag to look'}</div>
           ${returning ? '<button class="linkish reset">Start over (erase save)</button>' : ''}
         </div>`);
       this.root.appendChild(el);
@@ -68,6 +93,7 @@ export class UI {
       });
       el.querySelector('.start').addEventListener('click', () => {
         alive = false;
+        if (IS_TOUCH) this.fullscreen(true); // phones: get the browser bars out of the way
         el.classList.add('fade');
         setTimeout(() => el.remove(), 600);
         resolve();
@@ -79,6 +105,7 @@ export class UI {
   openCreator() {
     const g = this.game;
     if (this.creator) return Promise.resolve();
+    if (g.player && g.player.mode !== 'walk' && g.player.mode !== 'sit') { this.toast('Find solid ground first, then change your look.'); return Promise.resolve(); }
     return new Promise((resolve) => {
       const look = { ...defaultLook(), ...(g.save.data.look || { base: g.save.data.skin || CHARACTER_SKINS[0] }) };
       const before = JSON.stringify(look);
@@ -261,7 +288,6 @@ export class UI {
         </div>
         <div class="clock"></div>
         <div class="breath hidden"><span>AIR</span><div class="bar"><i></i></div></div>
-        <div class="carry hidden"></div>
       </div>`);
     this.root.appendChild(this.hudEl);
     this.hudEl.querySelector('.journal-btn').addEventListener('click', () => this.toggleJournal());
@@ -275,7 +301,25 @@ export class UI {
       audio.setMuted(save.data.muted);
       mb.textContent = save.data.muted ? '🔇' : '🔊';
     });
+    // photo mode hides the HUD, so it needs its own way out (there's no Escape key on a phone)
+    this.photoExit = $(`<button class="photo-exit" aria-label="Leave photo mode">✕ Done</button>`);
+    this.photoExit.addEventListener('click', () => { if (this.photo) this.togglePhoto(); });
+    this.root.appendChild(this.photoExit);
+    // the floating prompt can be tapped too
+    this.prompt.addEventListener('pointerdown', (e) => {
+      if (!this.ctx || !this.ctx.code) return;
+      e.preventDefault();
+      input.pressed.add(this.ctx.code);
+    });
     this.starCount(save.data.stars.length, game.world.totalStars);
+  }
+
+  fullscreen(on) {
+    const d = document, el = d.documentElement;
+    try {
+      if (on && !d.fullscreenElement && el.requestFullscreen) el.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
+      else if (!on && d.fullscreenElement) d.exitFullscreen().catch(() => {});
+    } catch (e) { /* not supported (iPhone Safari) */ }
   }
 
   hud(show) { this.hudEl.classList.toggle('hidden', !show); }
@@ -288,7 +332,7 @@ export class UI {
 
   toast(text, kind = '') {
     const t = $(`<div class="toast ${kind}"></div>`);
-    t.textContent = text;
+    t.textContent = ctl(text);
     this.toasts.appendChild(t);
     setTimeout(() => t.classList.add('out'), 3800);
     setTimeout(() => t.remove(), 4400);
@@ -313,7 +357,7 @@ export class UI {
     el.querySelector('.dname').textContent = name;
     if (!name) el.querySelector('.dname').remove();
     this.root.appendChild(el);
-    const st = { el, lines, i: 0, shown: 0, pitch, onClose, t: 0 };
+    const st = { el, lines: lines.map(ctl), i: 0, shown: 0, pitch, onClose, t: 0 };
     this.dlg = st;
     el.addEventListener('pointerdown', (e) => { e.stopPropagation(); this.advance(); });
     this.prompt.classList.add('hidden');
@@ -363,7 +407,7 @@ export class UI {
         <ul class="jlist" data-t="p">${places}</ul>
         <ul class="jlist hidden" data-t="f">${friends}</ul>
         <ul class="jlist cols hidden" data-t="c">${crit}</ul>
-        <div class="jfoot">${g.player.hasGlider ? '☂ You have a parasol: hold SPACE while falling.' : 'Tip: someone in Pebbleton makes parasols…'}</div>
+        <div class="jfoot">${g.player.hasGlider ? ctl('☂ You have a parasol: {hold SPACE} while falling.') : 'Tip: someone in Pebbleton makes parasols…'}</div>
       </div>`);
     el.querySelectorAll('.jtabs button').forEach((b) => b.addEventListener('click', () => {
       el.querySelectorAll('.jtabs button').forEach((x) => x.classList.toggle('on', x === b));
@@ -380,10 +424,12 @@ export class UI {
 
   toggleHelp() {
     if (this.help) { this.help.remove(); this.help = null; return; }
-    this.help = $(`
-      <div class="help">
-        <div class="jhead">HOW TO WANDER <button class="close" aria-label="Close">✕</button></div>
-        <table>
+    const rows = IS_TOUCH ? `
+          <tr><td><b>Left thumb</b></td><td>Touch anywhere on the left and drag to walk · push all the way to run (scares animals!)</td></tr>
+          <tr><td><b>JUMP</b></td><td>Jump · hold it in the air to glide (once you have a parasol)</td></tr>
+          <tr><td><b>Pop-up button</b></td><td>Appears when something's nearby: talk, pet, sit, read, ride, hop out…</td></tr>
+          <tr><td><b>Drag</b> · <b>Pinch</b></td><td>Look around · Zoom</td></tr>
+          <tr><td><b>📖 📷 🔊</b></td><td>Journal · Photo mode · Sound</td></tr>` : `
           <tr><td><b>WASD</b> / Arrows</td><td>Walk</td></tr>
           <tr><td><b>Shift</b></td><td>Run (scares animals!)</td></tr>
           <tr><td><b>Space</b></td><td>Jump · hold in the air to glide (once you have a parasol) · swim up</td></tr>
@@ -395,11 +441,18 @@ export class UI {
           <tr><td><b>Drag</b> · <b>Scroll</b></td><td>Look around · Zoom</td></tr>
           <tr><td><b>J</b> / Tab</td><td>Journal</td></tr>
           <tr><td><b>P</b></td><td>Photo mode (hide UI)</td></tr>
-          <tr><td><b>M</b></td><td>Mute</td></tr>
-        </table>
+          <tr><td><b>M</b></td><td>Mute</td></tr>`;
+    const canFull = IS_TOUCH && document.fullscreenEnabled;
+    this.help = $(`
+      <div class="help">
+        <div class="jhead">HOW TO WANDER <button class="close" aria-label="Close">✕</button></div>
+        <table>${rows}</table>
         <p>Find all the places, make friends, befriend critters and collect Stardrops. Or just walk around. That's fine too.</p>
+        ${canFull ? '<button class="fs-btn">⛶ Toggle fullscreen</button>' : ''}
       </div>`);
     this.help.querySelector('.close').addEventListener('click', () => this.toggleHelp());
+    const fs = this.help.querySelector('.fs-btn');
+    if (fs) fs.addEventListener('click', () => this.fullscreen(!document.fullscreenElement));
     this.root.appendChild(this.help);
   }
 
@@ -409,18 +462,70 @@ export class UI {
     if (this.photo) this.toastPhoto = setTimeout(() => {}, 0);
   }
 
+  /** On-screen controls: floating joystick (left), jump (right), and a pop-up action button above it. */
   showTouch(input) {
     const el = $(`
       <div class="touch">
+        <div class="joyzone"></div>
         <div class="joy"><div class="knob"></div></div>
-        <button class="tb jump">⤒</button>
-        <button class="tb act">E</button>
-        <button class="tb dive" aria-label="Dive">⤓</button>
-        <button class="tb grab" aria-label="Pick up or throw">✋</button>
+        <button class="tb jump" aria-label="Jump"><span class="ico">⤒</span><small>JUMP</small></button>
+        <button class="tb dive" aria-label="Dive"><span class="ico">⤓</span><small>DIVE</small></button>
+        <button class="act" aria-label="Interact"><span class="ico"></span><span class="lbl"></span></button>
       </div>`);
     this.root.appendChild(el);
-    input.bindTouch(el.querySelector('.joy'), el.querySelector('.knob'), [[el.querySelector('.jump'), 'Space'], [el.querySelector('.act'), 'KeyE'], [el.querySelector('.dive'), 'KeyDive'], [el.querySelector('.grab'), 'KeyF']]);
+    input.bindJoystick(el.querySelector('.joyzone'), el.querySelector('.joy'), el.querySelector('.knob'));
+    input.bindButton(el.querySelector('.jump'), 'Space');
+    input.bindButton(el.querySelector('.dive'), 'KeyDive');
+    this.diveBtn = el.querySelector('.dive');
+    this.actBtn = el.querySelector('.act');
+    input.bindButton(this.actBtn, () => (this.ctx && this.ctx.code) || null);
+    this.jumpIco = el.querySelector('.jump .ico');
     document.body.classList.add('is-touch');
+  }
+
+  /**
+   * Float the prompt over whatever you can interact with (or over yourself for stand up / hop out / jump out),
+   * and on touch screens pop up the big action button in thumb reach.
+   */
+  showAction(ctx, game) {
+    const { player, camera } = game;
+    this.ctx = ctx;
+    const key = ctx ? ctx.label + '|' + (ctx.name || '') : '';
+    const icon = ctx ? ctx.icon || ICONS[ctx.label] || '✋' : '';
+    if (key !== this._ctxKey) {
+      this._ctxKey = key;
+      if (ctx) {
+        this.prompt.querySelector('span').textContent = ctx.label + (ctx.name ? ' · ' + ctx.name : '');
+        const k = this.prompt.querySelector('.key');
+        k.textContent = IS_TOUCH ? icon : ctx.key;
+        k.classList.toggle('wide', !IS_TOUCH && ctx.key.length > 1);
+      }
+      if (this.actBtn) {
+        this.actBtn.classList.toggle('show', !!ctx);
+        if (ctx) {
+          this.actBtn.querySelector('.ico').textContent = icon;
+          this.actBtn.querySelector('.lbl').innerHTML = '';
+          this.actBtn.querySelector('.lbl').append(ctx.label, ...(ctx.name ? [Object.assign(document.createElement('small'), { textContent: ctx.name })] : []));
+          this.actBtn.classList.remove('pop'); void this.actBtn.offsetWidth; this.actBtn.classList.add('pop');
+        }
+      }
+    }
+    if (this.jumpIco) {
+      const glide = player.hasGlider && !player.onGround && player.mode !== 'swim' && player.mode !== 'ride';
+      const ico = glide ? '☂' : '⤒';
+      if (this.jumpIco.textContent !== ico) this.jumpIco.textContent = ico;
+    }
+    if (!ctx) { this.prompt.classList.add('hidden'); return; }
+    const at = ctx.it ? ctx.it.pos : player.pos;
+    const lift = ctx.it ? (ctx.it.npc ? 2.6 : 1.6) : 2.4;
+    const v = this._v.copy(at).addScaledVector(this._v2.copy(at).normalize(), lift).project(camera);
+    if (v.z > 1 || Math.abs(v.x) > 1.1 || Math.abs(v.y) > 1.1) { this.prompt.classList.add('hidden'); return; } // behind / off screen
+    this.prompt.classList.remove('hidden');
+    // keep the whole bubble on screen when its target is near an edge
+    const hw = this.prompt.offsetWidth / 2 + 8, ph = this.prompt.offsetHeight + 8;
+    const x = Math.min(Math.max(((v.x + 1) / 2) * innerWidth, hw), innerWidth - hw);
+    const y = Math.max(((1 - v.y) / 2) * innerHeight, ph);
+    this.prompt.style.transform = `translate(${x}px, ${y}px) translate(-50%, -100%)`;
   }
 
   // ------------------------------------------------------------------ per-frame
@@ -438,14 +543,14 @@ export class UI {
     const showBreath = player.mode === 'dive' || player.breath < 0.999;
     br.classList.toggle('hidden', !showBreath);
     if (showBreath) { const i = br.querySelector('i'); i.style.width = Math.round(player.breath * 100) + '%'; br.classList.toggle('low', player.breath < 0.25); }
-    const carry = this.hudEl.querySelector('.carry');
-    carry.classList.toggle('hidden', !player.holding);
-    if (player.holding) { const t = `Carrying ${player.holding.name}: F or E to throw`; if (carry.textContent !== t) carry.textContent = t; }
+    if (this.diveBtn) this.diveBtn.classList.toggle('show', player.inWater);
     if (input.hit('Escape')) { this.toggleJournal(false); if (this.help) this.toggleHelp(); if (this.photo) this.togglePhoto(); if (this.settingsEl) this.toggleSettings(); }
+    if (this.modal !== this._wasModal) { this._wasModal = this.modal; document.body.classList.toggle('modal', this.modal); }
     if (this.creator) return;
 
     // dialogue typing
     if (this.dlg) {
+      this.showAction(null, game);
       const st = this.dlg;
       const line = st.lines[st.i];
       if (st.shown < line.length) {
@@ -456,7 +561,7 @@ export class UI {
       }
       st.el.querySelector('.dtext').textContent = line.slice(0, Math.floor(st.shown));
       st.el.querySelector('.dnext').style.visibility = st.shown >= line.length ? 'visible' : 'hidden';
-      if (input.hit('KeyE', 'Space', 'Enter', 'Tap')) this.advance();
+      if (input.hit('KeyE', 'Space', 'Enter', 'Tap', 'TouchTap')) this.advance();
       return;
     }
 
@@ -468,30 +573,37 @@ export class UI {
     const txt = `${icon} ${String(hrs).padStart(2, '0')}:${String(Math.floor(mins / 10) * 10).padStart(2, '0')}`;
     if (clk.textContent !== txt) clk.textContent = txt;
 
-    // nearest interactable
-    let best = null, bestD = Infinity;
+    // nearest interactable, preferring whatever you're facing
+    let best = null, bestS = Infinity;
     const pp = player.pos;
-    if (player.mode !== 'sit' && !this.modal) {
+    if (player.mode !== 'sit' && player.mode !== 'ride' && !this.modal) {
       for (const it of interactables) {
         if (it.enabled === false) continue;
         if (it.body && player.holding) continue;
         const d = it.pos.distanceTo(pp);
-        if (d < it.radius && d < bestD) { best = it; bestD = d; }
+        if (d >= it.radius) continue;
+        const ahead = d > 0.01 ? this._v.copy(it.pos).sub(pp).dot(player.facing) / d : 1;
+        const score = d - Math.max(0, ahead) * 0.9;
+        if (score < bestS) { best = it; bestS = score; }
       }
-      if (player.mode === 'ride') best = null;
     }
     this.current = best;
-    if (best) {
-      const v = this._v.copy(best.pos).addScaledVector(best.pos.clone().normalize(), best.npc ? 2.6 : 1.6).project(camera);
-      this.prompt.classList.remove('hidden');
-      this.prompt.querySelector('span').textContent = best.label + (best.name ? ' · ' + best.name : '');
-      this.prompt.querySelector('.key').textContent = input.isTouch ? 'E' : 'E';
-      this.prompt.style.transform = `translate(${((v.x + 1) / 2) * innerWidth}px, ${((1 - v.y) / 2) * innerHeight}px) translate(-50%, -100%)`;
-      if (input.hit('KeyE', 'Enter') || (input.hit('Tap') && !input.isTouch)) {
-        best.action();
-        input.pressed.clear();
-      }
-    } else this.prompt.classList.add('hidden');
+
+    // what E (or the pop-up button) does right now
+    const { boat, balloon } = game.world;
+    let ctx = null;
+    if (!this.modal) {
+      if (player.mode === 'sit') ctx = { label: 'Stand up', code: 'KeyE', key: 'E' };
+      else if (boat && boat.riding) ctx = boat.landing ? { label: 'Hop out', code: 'KeyE', key: 'E' } : null;
+      else if (balloon && balloon.flying && player.mode === 'ride') ctx = { label: 'Jump out', code: 'Space', key: 'SPACE' };
+      else if (player.holding) ctx = { label: 'Throw', name: player.holding.name, code: 'KeyF', key: 'F', icon: '🤾' };
+      else if (best) ctx = { label: best.label, name: best.name, icon: best.icon, code: 'KeyE', key: 'E', it: best };
+    }
+    this.showAction(ctx, game);
+    if (best && (input.hit('KeyE', 'Enter') || input.hit('Tap'))) {
+      best.action();
+      input.pressed.clear();
+    }
 
     // NPC speech bubbles
     const npcs = game.world.people.npcs;

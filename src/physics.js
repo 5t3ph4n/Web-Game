@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { R, sample, normalAt } from './planet.js';
 import { waveHeight } from './water.js';
 import { tangent } from './player.js';
+import { resolve } from './collision.js';
 
 const G = 20;
 const _d = new THREE.Vector3(), _n = new THREE.Vector3(), _t = new THREE.Vector3(), _q = new THREE.Quaternion();
@@ -182,28 +183,25 @@ export class Physics {
       b.vel.addScaledVector(tv, -Math.min(1, dt * b.friction * (b.roll ? 1.2 : 4)));
       grounded = true;
     }
-    // static props (vertical cylinders)
-    for (const c of game.colliders.near(b.pos)) {
-      if (c.removed || c.passive) continue;
-      _rel.copy(b.pos).sub(c.pos);
-      const along = _rel.dot(c.up);
-      if (along > c.top + b.radius * 0.5 || along < -b.radius) continue;
-      _rel.addScaledVector(c.up, -along);
-      const dist = _rel.length();
-      const minD = c.r + b.radius;
-      if (dist >= minD) continue;
-      if (along > c.top - b.radius * 0.3 && c.top !== Infinity) {
-        // resting on top of it
-        b.pos.addScaledVector(c.up, c.top + b.radius - along);
-        const vn = b.vel.dot(c.up);
-        if (vn < 0) b.vel.addScaledVector(c.up, -vn * (1 + b.bounce));
-        grounded = true;
-        continue;
+    // static props: same mesh-based colliders the player uses (houses, rocks, carts, piers...)
+    {
+      const up2 = _t.copy(b.pos).normalize();
+      const feet = _rel.copy(b.pos).addScaledVector(up2, -b.radius);
+      const res = resolve(game.colliders, feet, b.radius * 0.9, { height: b.radius * 2, step: b.radius * 0.6, prevR: b.prevFeetR });
+      if (res.push.lengthSq() > 1e-10) {
+        const nrm = _n.copy(res.push).normalize();
+        const vn = b.vel.dot(nrm);
+        if (vn < 0) { b.vel.addScaledVector(nrm, -vn * (1 + b.bounce)); if (-vn > 5) game.audio.kick(); }
       }
-      if (dist < 1e-4) _rel.set(1, 0, 0); else _rel.divideScalar(dist);
-      b.pos.addScaledVector(_rel, minD - dist);
-      const vn = b.vel.dot(_rel);
-      if (vn < 0) b.vel.addScaledVector(_rel, -vn * (1 + b.bounce));
+      const fr = feet.length();
+      if (res.floor > fr - 0.02 && res.floor > -Infinity) {
+        feet.setLength(res.floor);
+        const vn = b.vel.dot(up2);
+        if (vn < 0) b.vel.addScaledVector(up2, -vn * (1 + b.bounce));
+        grounded = true;
+      }
+      b.pos.copy(feet).addScaledVector(_d.copy(feet).normalize(), b.radius);
+      b.prevFeetR = b.pos.length() - b.radius;
     }
     // visual rotation
     const sp = b.vel.length();

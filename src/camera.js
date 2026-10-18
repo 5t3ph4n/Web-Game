@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { R, sample } from './planet.js';
 import { tangent } from './player.js';
+import { resolve } from './collision.js';
 
 /** Third-person orbit camera that lives in the player's local (curved) frame. */
 export class FollowCam {
@@ -58,19 +59,11 @@ export class FollowCam {
     if (player.mode === 'dive' && camPos.length() > R - 0.3 && player.depth > 0.6) camPos.setLength(R - 0.3);
     // don't let the camera sit inside houses, ships and big rocks
     if (this.colliders) {
-      const v = new THREE.Vector3();
-      for (const c of this.colliders.near(camPos)) {
-        if (c.removed || c.passive || c.r < 1.2) continue;
-        v.copy(camPos).sub(c.pos);
-        const along = v.dot(c.up);
-        if (along < -1 || along > c.top + 0.3) continue;
-        v.addScaledVector(c.up, -along);
-        const d = v.length(), min = c.r + 0.5;
-        if (d < min) {
-          if (c.top !== Infinity && c.top < 6) camPos.addScaledVector(c.up, c.top + 0.4 - along);
-          else camPos.addScaledVector(d > 1e-4 ? v.divideScalar(d) : v.set(1, 0, 0), min - d);
-        }
-      }
+      const cu = camPos.clone().normalize();
+      const feet = camPos.clone().addScaledVector(cu, -0.3);
+      const res = resolve(this.colliders, feet, 0.35, { height: 0.6, step: 0 });
+      if (res.floor > feet.length()) feet.setLength(res.floor + 0.05);
+      camPos.copy(feet).addScaledVector(cu, 0.3);
     }
     if (this.shake > 0) {
       this.shake = Math.max(0, this.shake - dt * 2);
