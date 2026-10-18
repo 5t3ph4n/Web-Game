@@ -24,8 +24,12 @@ The build is fully static, so `dist/` can be hosted anywhere. A GitHub Pages wor
 | --- | --- |
 | WASD / Arrow keys | Walk |
 | Shift | Run (animals get spooked!) |
-| Space | Jump · hold while falling to glide with your parasol |
-| E / click | Talk, pet, sit, read, ride, ring bells… |
+| Space | Jump · hold while falling to glide with your parasol · swim up |
+| C / Ctrl | Dive under water (watch the AIR meter) |
+| E / click | Talk, pet, sit, read, ride, ring bells, pick things up… |
+| F | Pick up / throw balls, crates, barrels, fruit and snowballs |
+| K | Character creator |
+| L | Toggle your lantern at night |
 | Mouse drag · scroll | Orbit camera · zoom |
 | J / Tab | Journal (places, friends, critters, fast travel) |
 | P | Photo mode (hides the UI) |
@@ -36,13 +40,41 @@ On phones and tablets:
 | Touch | Action |
 | --- | --- |
 | Left side of the screen | Floating joystick: touch anywhere and drag to walk, push all the way to run |
-| JUMP | Jump · hold while falling to glide |
+| JUMP | Jump · hold while falling to glide · swim up |
+| DIVE | Appears while swimming: hold to dive |
 | Pop-up button (above JUMP) | Appears when something's nearby: Talk, Pet, Sit, Read, Row, Board, Ring… and Stand up / Hop out / Jump out while sitting, rowing or flying. The floating label over the target can be tapped too |
 | Drag (right side) · Pinch | Orbit camera · zoom |
-| 📖 📷 🔊 ? | Journal, photo mode (tap **✕ Done** to leave), sound, help |
+| 📖 👕 📷 🔊 ⚙ ? | Journal, character creator, photo mode (tap **✕ Done** to leave), sound, settings, help |
 
 Starting the game on a phone goes fullscreen where the browser allows it. Add `?touch=1` (or `?touch=0`) to the
 URL to force the touch controls on or off.
+
+## Character creator
+
+Open it from the title screen, the 👕 button or **K**. Pick one of 12 base styles, then set skin tone, hair,
+top, bottoms and shoes colours, height, head size and build, and add a hat (cap, beanie, top hat, straw or
+cowboy hat, crown, wizard or party hat, flower, bunny ears, headphones), face accessory (glasses,
+sunglasses, mustache, rosy cheeks, monocle) and something on your back (backpack, fairy wings, or a cape or
+scarf simulated as cloth). Your look is saved with your game.
+
+## Graphics & physics
+
+- **Two art styles** (⚙ Settings): *Realistic* (default) uses physically based materials, image-based
+  lighting from the live sky, soft shadows, screen-space ambient occlusion, bloom and filmic tone mapping;
+  *Storybook* is the original cel-shaded look with ink outlines.
+- **Quality presets** (Low / Medium / High) change resolution, shadow detail, anti-aliasing, AO, bloom,
+  the number of dynamic lights and draw distance. The game steps down automatically if it runs slowly.
+- **Dynamic lights**: lanterns, campfires, glowing mushrooms, the lighthouse and your own lantern light up
+  the night, and house windows glow.
+- **Water**: a see-through sea with wave normals, sky reflections and sun glints; caustics and light shafts
+  underwater, with fog that thickens with depth.
+- **Swimming**: in deep water you swim at the surface (front crawl when moving, treading water when still)
+  and can dive with an air meter. You bob on the actual waves, splash when you jump in and climb out onto
+  shallows, piers and lily pads.
+- **Props**: balls, crates, barrels, pumpkins, melons, snowballs and boulders have mass, bounce, friction
+  and buoyancy (crates and barrels float, boulders sink). Run into them, or pick them up and throw them.
+- **Movement**: momentum and drag, sliding on very steep slopes, heavy landings that squash and shake the
+  camera, and a rowboat that pitches and rolls with the swell.
 
 ## What's on the planet
 
@@ -67,9 +99,14 @@ music and sound effects. Progress is saved in your browser.
 - [three.js](https://threejs.org) + [Vite](https://vitejs.dev), no other runtime dependencies.
 - **Planet**: cube-sphere terrain generated from simplex noise, region "cones", terracing, land-bridge paths
   and flattened plazas (`src/planet.js`).
-- **Look**: toon (cel) materials with a 4-band ramp, a custom post pass that draws wobbly ink outlines from
-  depth discontinuities, creases and colour edges, plus paper grain and vignette (`src/post.js`). Foliage and
-  grass sway in the wind and bend around the player; anything between the camera and player dithers away.
+- **Look**: a material factory (`src/toon.js`) that builds PBR or cel materials depending on the art style,
+  with shader hooks for wind sway, see-through occluders, terrain detail bump, caustics and lit windows. A
+  custom render pipeline (`src/post.js`): HDR scene pass → SSAO → ink lines / underwater → bloom → ACES.
+  Dynamic lights come from a fixed pool assigned to the nearest sources each frame (`src/lights.js`).
+- **Physics**: rigid-body props with spherical gravity, buoyancy and impulses (`src/physics.js`); cloth
+  capes are a verlet grid pinned to the shoulders (`Cloth` in `src/character.js`).
+- **Characters**: the creator recolours the shared Kenney palette per vertex region (skin, hair, top,
+  bottoms, shoes are found from each vertex's bone and height) and attaches accessories to the head bone.
 - **Movement**: spherical-gravity character controller with slope limits, standable props, swimming and
   gliding (`src/player.js`); a camera that orbits in the player's curved local frame (`src/camera.js`).
   You slide along walls and cliffs instead of sticking, step up small ledges, and can climb out of the water
